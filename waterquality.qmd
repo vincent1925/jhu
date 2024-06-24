@@ -2,12 +2,69 @@
 ```{python}
 
 import pandas as pd
-df = pd.read_table("SDWIS4.tab", encoding="ISO-8859-1")
+import numpy as np
+
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', 50)
+
+
+
+``` 
+
+```{python}
+water = pd.read_table("SDWIS4.tab", encoding="ISO-8859-1")
+mortality = pd.read_csv("20231206_deaths_final_2019-2022__zip_year_sup.csv")
+boundaries = pd.read_csv("California_Drinking_Water_System_Area_Boundaries.csv")
+```
+
+```{python}
+
+# filtering out causes from mortality 
+cause_list = ["ALZ", "CAN", "CLD", "DIA", "HOM", "HTD", "HYP", "INJ", "LIV", "NEP", "PAR", "PNF", "STK", "SUI"]
+
+mortality = mortality[~mortality["Cause"].isin(cause_list)]
+
+# mortality with only age as strata 
+mortality_age = mortality[mortality["Strata"] == "Age"]
+
+# mortality with total population as strata
+mortality_total = mortality[mortality["Strata"] == "Total Population"]
+
+# mortality with gender as strata
+mortality_gender = mortality[mortality["Strata"] == "Gender"]
 
 ```
 
 ```{python}
 
-df.head()
+# leave only the columns water system number and the zip code of boundaries using loc
+boundaries_zip = boundaries.loc[:, ["WATER_SYSTEM_NUMBER", "ADDRESS_ZIP_CODE"]]
+
+# preparing the zip code column for merging
+boundaries_zip = boundaries_zip.rename(columns={"ADDRESS_ZIP_CODE": "ZIP_Code"})
+
+boundaries_zip["ZIP_Code"] = boundaries_zip["ZIP_Code"].fillna("0")
+
+sep = '-'
+boundaries_zip["ZIP_Code"] = boundaries_zip["ZIP_Code"].str.split(sep).str[0]
+boundaries_zip["ZIP_Code"] = boundaries_zip["ZIP_Code"].astype(str)
+
+# merging water with boundaries on water system number
+water = water.rename(columns={"Water System Number": "WATER_SYSTEM_NUMBER"})
+water["WATER_SYSTEM_NUMBER"] = water["WATER_SYSTEM_NUMBER"].str.rstrip()
+
+water_boundaries = pd.merge(water, boundaries_zip, on="WATER_SYSTEM_NUMBER", how="left")
+water_boundaries
+```
+
+```{python}
+
 
 ```
+
+```{python}
+
+
+```
+
+
