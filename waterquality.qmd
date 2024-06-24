@@ -5,3 +5,9 @@ import pandas as pd
 df = pd.read_table("/Users/zheng/Downloads/SDWIS4.tab", encoding="ISO-8859-1")
 
 ```
+
+```{python}
+
+df.head()
+
+```
