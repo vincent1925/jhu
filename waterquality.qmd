@@ -22,6 +22,8 @@ pd.set_option('display.max_rows', 50)
 
 ``` 
 
+# Getting the tables
+
 ```{python}
 
 # getting the tables
@@ -30,6 +32,10 @@ water2 = pd.read_table("SDWIS2.tab", encoding="ISO-8859-1")
 water3 = pd.read_table("SDWIS3.tab", encoding="ISO-8859-1")
 water4 = pd.read_table("SDWIS4.tab", encoding="ISO-8859-1")
 water = pd.concat([water1, water2, water3, water4])
+
+# drop columns "Water System Name", "Lab Name", "Sample Time", "Method", "System Status", "Analysis Date", "Lab Name", "Regulating Agency", "ELAP Cert#"
+dropped_cols = ["Water System Name", "Lab Name", "Sample Time", "Method", "System Status", "Analysis Date", "Lab Name", "Regulating Agency", "ELAP Cert#"]
+water = water.drop(columns=dropped_cols)
 
 mortality1 = pd.read_csv("20231206_deaths_final_2019-2022__zip_year_sup.csv")
 mortality2 = pd.read_csv("20221206_deaths_final_2009-2018__zip_year_sup.csv")
@@ -107,11 +113,12 @@ water_boundaries
 
 # merging water_boundaries with mortality on zipcode
 
-# years in mortality
-mortality["Year"].unique()
-
 ```
 
+```{python}
 
+water.columns.tolist()
+
+```
 
 
