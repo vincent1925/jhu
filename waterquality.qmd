@@ -1,4 +1,17 @@
-# Draft
+---
+title: "Water Quality Draft"
+author: "Vincent Zheng"
+date: 6/25/2024"
+latex-auto-mk: true
+output: html_document
+format:
+  html:
+    code-fold: show
+    code-tools: 
+      source: true
+      toggle: true
+---
+
 ```{python}
 
 import pandas as pd
@@ -7,22 +20,37 @@ import numpy as np
 pd.set_option('display.max_columns', None)
 pd.set_option('display.max_rows', 50)
 
-
-
 ``` 
 
 ```{python}
-water = pd.read_table("SDWIS4.tab", encoding="ISO-8859-1")
-mortality = pd.read_csv("20231206_deaths_final_2019-2022__zip_year_sup.csv")
+
+# getting the tables
+water1 = pd.read_table("SDWIS1.tab", encoding="ISO-8859-1")
+water2 = pd.read_table("SDWIS2.tab", encoding="ISO-8859-1")
+water3 = pd.read_table("SDWIS3.tab", encoding="ISO-8859-1")
+water4 = pd.read_table("SDWIS4.tab", encoding="ISO-8859-1")
+water = pd.concat([water1, water2, water3, water4])
+
+mortality1 = pd.read_csv("20231206_deaths_final_2019-2022__zip_year_sup.csv")
+mortality2 = pd.read_csv("20221206_deaths_final_2009-2018__zip_year_sup.csv")
+mortality = pd.concat([mortality1, mortality2])
+
 boundaries = pd.read_csv("California_Drinking_Water_System_Area_Boundaries.csv")
+
 ```
+
+# Cleaning Mortality Data
+
+As we've discussed, I kept only the general cause of mortality. Additionally, I seperated out the strata by gender, age, and total. We'll be focusing on age and I'll be adjusting mortality rates for age in the future. I dropped the data in years 2009 and 2010 because we're using water data starting from 2011.
 
 ```{python}
 
 # filtering out causes from mortality 
 cause_list = ["ALZ", "CAN", "CLD", "DIA", "HOM", "HTD", "HYP", "INJ", "LIV", "NEP", "PAR", "PNF", "STK", "SUI"]
-
 mortality = mortality[~mortality["Cause"].isin(cause_list)]
+
+# drop rows that are in years 2009 and 2010 in mortality
+mortality = mortality[~mortality["Year"].isin(["2009", "2010"])]
 
 # mortality with only age as strata 
 mortality_age = mortality[mortality["Strata"] == "Age"]
@@ -35,36 +63,55 @@ mortality_gender = mortality[mortality["Strata"] == "Gender"]
 
 ```
 
+# Cleaning Water Data
+
+I dropped the data in years 2023 and 2024 because we're using mortality data up to 2022. I used the boundaries data to get the zip codes of the office corresponding to each water system.
+
 ```{python}
 
-# leave only the columns water system number and the zip code of boundaries using loc
+# make a new column in water that gets the year under sample date
+water["Sample Year"] = water["Sample Date"].str.split("-").str[2]
+
+# drop rows that are in years 2023 and 2024
+water = water[~water["Sample Year"].isin(["2023", "2024"])] 
+
+water.head(10)
+```
+
+```{python}
+
+# merging water with boundaries
+
+# leave only the columns water system number and the zip code of boundaries
 boundaries_zip = boundaries.loc[:, ["WATER_SYSTEM_NUMBER", "ADDRESS_ZIP_CODE"]]
 
 # preparing the zip code column for merging
 boundaries_zip = boundaries_zip.rename(columns={"ADDRESS_ZIP_CODE": "ZIP_Code"})
-
 boundaries_zip["ZIP_Code"] = boundaries_zip["ZIP_Code"].fillna("0")
 
+# removing the last four digits of the zip code
 sep = '-'
 boundaries_zip["ZIP_Code"] = boundaries_zip["ZIP_Code"].str.split(sep).str[0]
 boundaries_zip["ZIP_Code"] = boundaries_zip["ZIP_Code"].astype(str)
 
 # merging water with boundaries on water system number
 water = water.rename(columns={"Water System Number": "WATER_SYSTEM_NUMBER"})
-water["WATER_SYSTEM_NUMBER"] = water["WATER_SYSTEM_NUMBER"].str.rstrip()
+water["WATER_SYSTEM_NUMBER"] = water["WATER_SYSTEM_NUMBER"].str.rstrip() #removes the trailing whitespace
 
 water_boundaries = pd.merge(water, boundaries_zip, on="WATER_SYSTEM_NUMBER", how="left")
 water_boundaries
-```
-
-```{python}
-
 
 ```
 
 ```{python}
 
+# merging water_boundaries with mortality on zipcode
+
+# years in mortality
+mortality["Year"].unique()
 
 ```
+
+
 
 
