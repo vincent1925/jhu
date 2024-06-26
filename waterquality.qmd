@@ -16,6 +16,8 @@ format:
 
 import pandas as pd
 import numpy as np
+import geopandas as gpd
+import matplotlib.pyplot as plt
 
 pd.set_option('display.max_columns', None)
 pd.set_option('display.max_rows', 50)
@@ -33,12 +35,15 @@ water3 = pd.read_table("SDWIS3.tab", encoding="ISO-8859-1")
 water4 = pd.read_table("SDWIS4.tab", encoding="ISO-8859-1")
 water = pd.concat([water1, water2, water3, water4])
 
+water_geo = gpd.read_file('California_Drinking_Water_System_Area_Boundaries/California_Drinking_Water_System_Area_Boundaries.shp')
+zip_geo = gpd.read_file('california_zip_codes/California_Zip_Codes.shp')
+
 # drop columns "Water System Name", "Lab Name", "Sample Time", "Method", "System Status", "Analysis Date", "Lab Name", "Regulating Agency", "ELAP Cert#"
 dropped_cols = ["Water System Name", "Lab Name", "Sample Time", "Method", "System Status", "Analysis Date", "Lab Name", "Regulating Agency", "ELAP Cert#"]
 water = water.drop(columns=dropped_cols)
 
-mortality1 = pd.read_csv("20231206_deaths_final_2019-2022__zip_year_sup.csv")
-mortality2 = pd.read_csv("20221206_deaths_final_2009-2018__zip_year_sup.csv")
+mortality1 = pd.read_csv("cali_deaths_2009-2018.csv")
+mortality2 = pd.read_csv("cali_deaths_20019-2022.csv")
 mortality = pd.concat([mortality1, mortality2])
 
 boundaries = pd.read_csv("California_Drinking_Water_System_Area_Boundaries.csv")
@@ -84,6 +89,40 @@ water = water[~water["Sample Year"].isin(["2023", "2024"])]
 water.head(10)
 ```
 
+# Merging Water Data with Boundaries
+
+```{python}
+
+water_geo = water_geo.loc[:, ["WATER_SYST", "geometry", "Shape__Are", "Shape__Len"]]
+
+fig, ax = plt.subplots(figsize=(15, 10))
+zip_geo.plot(ax = ax, cmap = "jet", edgecolor="black", column="ZIP_CODE", linewidth=0.1)
+water_geo.plot(ax = ax, color = "blue", edgecolor="black", column="WATER_SYST", linewidth=0.25)
+
+plt.show()
+
+```
+
+```{python}
+
+zip_geo = zip_geo.to_crs(water_geo.crs)
+
+from geopandas.tools import sjoin
+
+joined_gdf = sjoin(water_geo, zip_geo, how='left', op='intersects')
+water_system_zip_codes = joined_gdf.groupby('WATER_SYST')['ZIP_CODE'].unique().reset_index()
+
+display(water_system_zip_codes.head(5))
+
+print(water_system_zip_codes.shape)
+print(water_geo.shape)  
+print(water_geo.nunique())
+print(water_system_zip_codes['WATER_SYST'].nunique())
+
+```
+
+# Scrap
+
 ```{python}
 
 # merging water with boundaries
@@ -115,9 +154,5 @@ water_boundaries
 
 ```
 
-```{python}
-
-
-```
 
 
