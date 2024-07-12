@@ -26,23 +26,27 @@ pd.set_option('display.max_rows', 50)
 ``` 
 
 
+# issues
+- the number of watersystems in water data is different from the number of watersystems in water_geo data
+_ the number of zip codes in zip_geo is different from the mortality data. mortality data has 2664 for some reason
+
 # Getting the tables
 
 ```{python}
 
 # water quality data
 cols = ['Water System Number', 'Population Served', 'Sampling Point Name', 'Sample Date', 'Analyte Name', 'Result', 'Counting Error', 'Units of Measure', 'Less Than Reporting Level', 'Reporting Level', 'DLR', 'MCL']
-water1 = pd.read_table("SDWIS1.tab", encoding="ISO-8859-1", usecols=cols, dtype={20: str})
-water2 = pd.read_table("SDWIS2.tab", encoding="ISO-8859-1", usecols=cols, dtype={20: str})
-water3 = pd.read_table("SDWIS3.tab", encoding="ISO-8859-1", usecols=cols, dtype={20: str})
-water4 = pd.read_table("SDWIS4.tab", encoding="ISO-8859-1", usecols=cols, dtype={20: str})
-water = pd.concat([water1, water2, water3, water4])
+water1 = pd.read_table("SDWIS1.tab", encoding="ISO-8859-1", usecols = cols, dtype={20: str})
+water2 = pd.read_table("SDWIS2.tab", encoding="ISO-8859-1", usecols = cols, dtype={20: str})
+water3 = pd.read_table("SDWIS3.tab", encoding="ISO-8859-1", usecols = cols, dtype={20: str})
+water4 = pd.read_table("SDWIS4.tab", encoding="ISO-8859-1", usecols = cols, dtype={20: str})
+water = pd.concat([water1, water2, water3, water4], ignore_index=True)
 
 # mortality data
 cols = ['Year','ZIP_Code','Strata','Strata_Name','Cause','Cause_Desc','Count'] # dropped 'Annotation_Code','Annotation_Desc','Data_Revision_Date','ICD_Revision', 'Geography_Type'
 mortality1 = pd.read_csv("cali_deaths_2009-2018.csv", usecols=cols)
 mortality2 = pd.read_csv("cali_deaths_20019-2022.csv", usecols=cols)
-mortality = pd.concat([mortality1, mortality2])
+mortality = pd.concat([mortality1, mortality2], ignore_index=True)
 
 water_geo = gpd.read_file('California_Drinking_Water_System_Area_Boundaries/California_Drinking_Water_System_Area_Boundaries.shp')
 zip_geo = gpd.read_file('california_zip_codes/California_Zip_Codes.shp')
@@ -61,20 +65,20 @@ mortality = mortality[~mortality["Cause"].isin(cause_list)]
 mortality = mortality.rename(columns={"ZIP_Code": "ZIP_CODE"})
 
 # drop rows that are in years 2009 and 2010 in mortality
-mortality = mortality[~mortality["Year"].isin([2009, 2010])]
+mortality = mortality[~mortality["Year"].isin([2009, 2010])].reset_index(drop=True)
 
 # filling in NaN values with 0
 mortality["Count"] = mortality["Count"].fillna(0)
 
 # mortality with only age as strata 
-mortality_age = mortality[mortality["Strata"] == "Age"]
+mortality_age = mortality[mortality["Strata"] == "Age"].reset_index(drop=True)
 
 # mortality with total population as strata
-mortality_total = mortality[mortality["Strata"] == "Total Population"]
+mortality_total = mortality[mortality["Strata"] == "Total Population"].reset_index(drop=True)
 mortality_total = mortality_total.drop(columns=["Strata", "Cause", "Cause_Desc"])
 
 # mortality with gender as strata
-mortality_gender = mortality[mortality["Strata"] == "Gender"]
+mortality_gender = mortality[mortality["Strata"] == "Gender"].reset_index(drop=True)
 
 ```
 
@@ -89,11 +93,84 @@ water["Sample Year"] = water["Sample Date"].str.split("-").str[2]
 water = water.drop(columns=["Sample Date"])
 
 # drop rows that are in years 2023 and 2024
-water = water[~water["Sample Year"].isin(["2023", "2024"])] 
+water = water[~water["Sample Year"].isin(["2023", "2024"])].reset_index(drop=True)
 
 # removing trailing whitespace
 water["Water System Number"] = water["Water System Number"].str.rstrip() 
 water["Analyte Name"] = water["Analyte Name"].str.rstrip() 
+water["Units of Measure"] = water["Units of Measure"].str.rstrip()
+water["Result"] = water["Result"].str.rstrip()
+
+# NaN values under result are replaced with reporting level divided by sqrt(2)
+water.loc[water['Result'].isnull() | (water['Result'] == ""), 'Result'] = water.loc[water['Result'].isnull() | (water['Result'] == ""), 'Reporting Level'] / np.sqrt(2)
+
+# there shouldn't be any nan values or empty values under 'Result' column
+water['Result'] = water['Result'].astype(float)
+
+# filling in values for 'Less Than Reporting Level' column
+ # can be made more efficient (np.select)
+problem = water.loc[(water['Less Than Reporting Level'] == ' ')].copy()  
+problem['Result'] = problem['Result'].astype(float)
+problem.loc[problem['Result'] < problem['Reporting Level'], 'Less Than Reporting Level'] = 'Y'
+problem.loc[problem['Result'] > problem['Reporting Level'], 'Less Than Reporting Level'] = 'N'
+problem.loc[problem['Result'] == problem['Reporting Level'], 'Less Than Reporting Level'] = 'Neither'
+water.update(problem)
+print(water['Less Than Reporting Level'].unique())
+
+# identifying analytes with multiple units of measure
+unique_units = water.groupby('Analyte Name')['Units of Measure'].unique().reset_index()
+multiple = unique_units[unique_units['Units of Measure'].apply(lambda x: len(x) > 1)]
+analytes_w_multiple_units = multiple['Analyte Name']
+
+# fixing units of chloroform
+analyte = 'CHLOROFORM'
+water.loc[(water['Analyte Name'] == 'CHLOROFORM') & (water['Units of Measure'] == ''), 'Units of Measure'] = 'UG/L' # assuming blank space is ug/l
+
+# fixing units of lead
+# dlr and mcl has NaN values that havent' been corrected because not working with them yet
+analyte = 'LEAD'
+water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == ''), 'Units of Measure'] = 'UG/L' # assuming blank space is ug/l because the reporting level of others match
+water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), ['Reporting Level', 'Result','DLR', 'MCL']] *= 1000 # converting mg/l to ug/l
+water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 'Units of Measure'] = 'UG/L'
+
+# fixing units of copper
+# dlr and mcl has NaN values that havent' been corrected because not working with them yet
+analyte = 'COPPER, FREE'
+water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == ''), 'Units of Measure'] = 'UG/L' # assuming blank space is ug/l because the reporting level of others match
+water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), ['Reporting Level', 'Result', 'DLR', 'MCL']] *= 1000 # converting mg/l to ug/l
+water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 'Units of Measure'] = 'UG/L'
+
+# fixing units of nitrite
+# dlr and mcl has NaN values that havent' been corrected because not working with them yet
+analyte = 'NITRITE'
+water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), ['Reporting Level', 'Result', 'DLR', 'MCL']] *= 1000 # converting mg/l to ug/l
+water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 'Units of Measure'] = 'UG/L'
+
+# fixing units of nitrate-nitrite
+# dlr and mcl has NaN values that havent' been corrected because not working with them yet
+analyte = 'NITRATE-NITRITE'
+water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), ['Reporting Level', 'Result', 'DLR', 'MCL']] *= 1000 # converting mg/l to ug/l
+water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 'Units of Measure'] = 'UG/L'
+
+# fixing units of aggressive index
+# dlr and mcl has NaN values that havent' been corrected because not working with them yet
+analyte = 'AGGRESSIVE INDEX'
+water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == ''), 'Units of Measure'] = 'AGGR' # assuming blank space is aggr despite it only have 127 rows of those that are reporting level since other reports from the same water system number have 8 occasionally
+
+water['Sample Year'] = water['Sample Year'].astype(int)
+
+```
+
+```{python}
+
+PATH = "/Users/zheng/Downloads/Internships:Work/water.csv"
+
+water.to_csv(PATH, index=False)
+
+water = pd.read_csv("water.csv")
+# shape should be 20199717, 12
+
+asdfsfdfa
 
 ```
 
@@ -104,7 +181,7 @@ water["Analyte Name"] = water["Analyte Name"].str.rstrip()
 # keeping only the relevant columns
 water_geo = water_geo.loc[:, ["WATER_SYST", "geometry"]] 
 zip_geo = zip_geo.loc[:, ["ZIP_CODE", "geometry"]]
-  # note that water_geo has 4798 rows instead of 4776 rows because of water systems that have mutliple geometries. this is solved when intersecting with zip_geo
+  # note that water_geo has 4798 rows instead of 4776 rows because of water systems that have multiple geometries. this is solved when intersecting with zip_geo which combines the zip codes
 
 # repairing invalid geometries which solves the nan values when sjoining
 water_geo['geometry'] = water_geo['geometry'].make_valid()
@@ -115,11 +192,12 @@ zip_geo = zip_geo.to_crs(water_geo.crs)
 
 # the zip codes that each water system serves
 # NEED TO FIX BACK TO LEFT
-water_zip = gpd.sjoin(water_geo, zip_geo, how='inner', predicate='intersects')
+water_zip = gpd.sjoin(water_geo, zip_geo, how='left', predicate='intersects')
 water_zip = water_zip.drop(columns=['index_right', 'geometry']).reset_index(drop=True)
 water_zip["ZIP_CODE"] = water_zip["ZIP_CODE"].astype(int)
 
 water_zip_grouped = water_zip.groupby('WATER_SYST')['ZIP_CODE'].apply(lambda x: ', '.join(str(x))).reset_index()
+
 
 ``` 
 
@@ -128,42 +206,86 @@ water_zip_grouped = water_zip.groupby('WATER_SYST')['ZIP_CODE'].apply(lambda x: 
 ```{python}
 
 # join mortality_total and water_zip on zip code
-df = pd.merge(mortality_total, water_zip, on="ZIP_CODE", how="left")
+df = pd.merge(mortality_total, water_zip, on="ZIP_CODE", how="inner")
+
+mortality_total.sort_values(by="ZIP_CODE", ascending=True)
+
+# Compare the unique zip codes in mortality_total and zip_geo
+mortality_zip_codes = mortality_total["ZIP_CODE"].unique()
+zip_geo_codes = zip_geo["ZIP_CODE"].unique()
+
+# Find the zip codes that are in mortality_total but not in zip_geo
+missing_zip_codes = set(mortality_zip_codes) - set(zip_geo_codes)
+
+# Find the zip codes that are in zip_geo but not in mortality_total
+extra_zip_codes = set(zip_geo_codes) - set(mortality_zip_codes)
+
+# Print the missing and extra zip codes
+print("Missing zip codes:", missing_zip_codes)
+print("Extra zip codes:", extra_zip_codes)
+len(missing_zip_codes)
+len(extra_zip_codes)
+
+mortality_total.loc[mortality_total["ZIP_CODE"] == 92161]
+zip_geo.loc[zip_geo["ZIP_CODE"] == 92161]
+
 
 # calculate the average count every year of each water system using zip codes
 average_count = df.groupby(['WATER_SYST', 'Year'])['Count'].mean().reset_index()
 
+```
+
+```{python}
+
+# try county fixed effects
+
+# reading up on calculating age adjusted mortality rates 
+
+# checking for outliers in the data
+
+# poisson regression or negative binomial regression specifically for count/rate data, weight by population
+
+# age adjust and population adjust! 
 
 ```
 
 ```{python}
 
 # getting the chloroform concentration for each water system for each year
-chloroform = water[water['Analyte Name'] == 'CHLOROFORM'].reset_index(drop=True)
+analyte = 'LEAD'
+analyte_water = water.loc[water['Analyte Name'] == analyte].copy().reset_index(drop=True)
 
-# fixes the row with a "                " as the result
-chloroform['Result'] = pd.to_numeric(chloroform['Result'], errors='coerce')
+analyte_water = analyte_water.groupby(['Water System Number', 'Sample Year'])['Result'].median().reset_index() # median because probably not normally distributed
 
-# replace NaN values with 0
-chloroform['Result'] = chloroform['Result'].fillna(0)
+analyte_water = analyte_water.rename(columns={"Water System Number": "WATER_SYST", "Sample Year": "Year"})
 
-# make result float
-chloroform['Result'] = chloroform['Result'].astype(float)
-chloroform['Sample Year'] = chloroform['Sample Year'].astype(int)
+import matplotlib.pyplot as plt
 
+plt.hist(analyte_water['Result'], bins=10, range=(analyte_water['Result'].min(), analyte_water['Result'].max()))
+plt.xlabel('Analyte Result')
+plt.ylabel('Frequency')
+plt.title('Histogram of Analyte Results')
+plt.yscale('log')
+plt.show()
 
-chloroform = chloroform.groupby(['Water System Number', 'Sample Year'])['Result'].mean().reset_index()
+lead_high_concentration = water[(water['Analyte Name'] == 'LEAD') & (water['Result'] > 300)]
+display(lead_high_concentration)
+water.dtypes
 
-chloroform = chloroform.rename(columns={"Water System Number": "WATER_SYST", "Sample Year": "Year"})
+water.loc[(water['Water System Number'] == 'CA3510001') & (water['Analyte Name'] == 'LEAD')].sort_values(by='Result')
+
+# FIND OUTLIERSS LIKE IN THE LINE BEFORE THIS ONE. when restarting, change it back to water2 and see if the outliers are because of you
+
+```
+```{python}
 
 ```
 
+
 ```{python}
 
-df['WATER_SYST'] = df['WATER_SYST'].astype(str)
-chloroform['WATER_SYST'] = chloroform['WATER_SYST'].astype(str)
-
-merged_data = pd.merge(df, chloroform, how = 'inner', on=['WATER_SYST', 'Year'])
+# inner because not every water system is 
+merged_data = pd.merge(df, analyte_water, how = 'inner', on=['WATER_SYST', 'Year'])
 
 # show rows with NaN values
 df[df.isnull().any(axis=1)]
@@ -175,59 +297,18 @@ merged_data = merged_data.set_index(['ZIP_CODE', 'Year'])
 
 display(merged_data)
 
+
 ```
 
 ```{python}
 
 from linearmodels import PanelOLS
 
-
 mod = PanelOLS.from_formula(
   "Count ~ Result + EntityEffects + TimeEffects", merged_data)
 
 twfe = mod.fit()
 print(twfe)
-
-```
-
-```{python}
-
-# get the rows where the zip code appears more than once in water_zip
-water_duplicates = water_zip[water_zip.duplicated(keep = False, subset = ["WATER_SYST"])]
-
-water_duplicates_91709 = water_duplicates[water_duplicates["ZIP_CODE"] == 91709]
-water_duplicates_91709
-
-```
-
-```{python}
-
-import statsmodels.api as sm
-
-# Merge water data with mortality data
-merged_data = pd.merge(water, mortality_age, on=["ZIP_CODE", "Year"], how="inner")
-
-# Create dummy variables for zip code-year fixed effects
-zip_year_dummies = pd.get_dummies(merged_data["ZIP_CODE"].astype(str) + merged_data["Year"].astype(str), prefix="zip_year")
-
-# Add the dummy variables to the merged data
-merged_data = pd.concat([merged_data, zip_year_dummies], axis=1)
-
-# Define the dependent variable
-y = merged_data["Mortality_Rate"]
-
-# Define the independent variables
-X = merged_data[["Concentration1", "Concentration2", "Concentration3", "Concentration4", "Concentration5"] + list(zip_year_dummies.columns)]
-
-# Add a constant term to the independent variables
-X = sm.add_constant(X)
-
-# Fit the fixed effects regression model
-model = sm.OLS(y, X)
-results = model.fit()
-
-# Print the regression results
-print(results.summary())
 
 ```
 
@@ -240,32 +321,6 @@ water_duplicates = water_geo[water_geo.duplicated(keep = False, subset = ["WATER
 water_system_zip_codes = water_geo[water_geo['WATER_SYST'].isin(water_duplicates['WATER_SYST'])]
 
 water_system_zip_codes
-
-```
-
-# Scrap
-
-```{python}
-
-# merging water with boundaries
-
-# leave only the columns water system number and the zip code of boundaries
-boundaries_zip = boundaries.loc[:, ["WATER_SYSTEM_NUMBER", "ADDRESS_ZIP_CODE"]]
-
-# preparing the zip code column for merging
-boundaries_zip = boundaries_zip.rename(columns={"ADDRESS_ZIP_CODE": "ZIP_Code"})
-boundaries_zip["ZIP_Code"] = boundaries_zip["ZIP_Code"].fillna("0")
-
-# removing the last four digits of the zip code
-sep = '-'
-boundaries_zip["ZIP_Code"] = boundaries_zip["ZIP_Code"].str.split(sep).str[0]
-boundaries_zip["ZIP_Code"] = boundaries_zip["ZIP_Code"].astype(str)
-
-# merging water with boundaries on water system number
-water = water.rename(columns={"Water System Number": "WATER_SYSTEM_NUMBER"})
-
-water_boundaries = pd.merge(water, boundaries_zip, on="WATER_SYSTEM_NUMBER", how="left")
-water_boundaries
 
 ```
 
