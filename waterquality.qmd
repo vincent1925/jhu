@@ -18,39 +18,65 @@ import pandas as pd
 import numpy as np
 import geopandas as gpd
 import matplotlib.pyplot as plt
-import geopandas as gpd
+from linearmodels import PanelOLS
+from census import Census
+import statsmodels.api as sm
+
 
 pd.set_option('display.max_columns', None)
 pd.set_option('display.max_rows', 50)
 
-``` 
+pd.set_option("display.float_format", lambda x: "{:.3f}".format(x))
+plt.style.use("ggplot")
+
+
+PATH = "/Users/zheng/Downloads/Internships:Work/water.csv"
+
+# water = pd.read_csv(PATH)
+
+```
+
 
 
 # issues
 - the number of watersystems in water data is different from the number of watersystems in water_geo data
 _ the number of zip codes in zip_geo is different from the mortality data. mortality data has 2664 for some reason
+- in analyte water, not every water system has a result for each year
+
+before i ran the regressions, i was going over my code to make sure i didn't make any bad assumptions mistakes. i remembered that i set all suppressed mortality count data to 0 so i could move on. how should i approach this? i know there are packages in r to simulate suppressed data
+
 
 # Getting the tables
-
 ```{python}
 
 # water quality data
-cols = ['Water System Number', 'Population Served', 'Sampling Point Name', 'Sample Date', 'Analyte Name', 'Result', 'Counting Error', 'Units of Measure', 'Less Than Reporting Level', 'Reporting Level', 'DLR', 'MCL']
-water1 = pd.read_table("SDWIS1.tab", encoding="ISO-8859-1", usecols = cols, dtype={20: str})
-water2 = pd.read_table("SDWIS2.tab", encoding="ISO-8859-1", usecols = cols, dtype={20: str})
-water3 = pd.read_table("SDWIS3.tab", encoding="ISO-8859-1", usecols = cols, dtype={20: str})
-water4 = pd.read_table("SDWIS4.tab", encoding="ISO-8859-1", usecols = cols, dtype={20: str})
+cols = ['Water System Number', 
+        'Population Served', 
+        'Sampling Point Name', 
+        'Sample Date', 
+        'Analyte Name', 
+        'Result', 
+        'Counting Error', 
+        'Units of Measure', 
+        'Less Than Reporting Level', 
+        'Reporting Level', 
+        'DLR', 
+        'MCL'
+        ]
+water1 = pd.read_table("california_water_systems/SDWIS1.tab", encoding="ISO-8859-1", usecols=cols, dtype={20: str})
+water2 = pd.read_table("california_water_systems/SDWIS2.tab", encoding="ISO-8859-1", usecols=cols, dtype={20: str})
+water3 = pd.read_table("california_water_systems/SDWIS3.tab", encoding="ISO-8859-1", usecols=cols, dtype={20: str})
+water4 = pd.read_table("california_water_systems/SDWIS4.tab", encoding="ISO-8859-1", usecols=cols, dtype={20: str})
 water = pd.concat([water1, water2, water3, water4], ignore_index=True)
 
 # mortality data
-cols = ['Year','ZIP_Code','Strata','Strata_Name','Cause','Cause_Desc','Count'] # dropped 'Annotation_Code','Annotation_Desc','Data_Revision_Date','ICD_Revision', 'Geography_Type'
-mortality1 = pd.read_csv("cali_deaths_2009-2018.csv", usecols=cols)
-mortality2 = pd.read_csv("cali_deaths_20019-2022.csv", usecols=cols)
+cols = ['Year','ZIP_Code','Strata','Strata_Name','Cause','Cause_Desc','Count','Annotation_Code','Annotation_Desc' ] # dropped 'Annotation_Code','Annotation_Desc','Data_Revision_Date','ICD_Revision', 'Geography_Type'
+mortality1 = pd.read_csv("california_mortality/cali_deaths_2009-2018.csv", usecols=cols)
+mortality2 = pd.read_csv("california_mortality/cali_deaths_2019-2022.csv", usecols=cols)
 mortality = pd.concat([mortality1, mortality2], ignore_index=True)
 
 water_geo = gpd.read_file('California_Drinking_Water_System_Area_Boundaries/California_Drinking_Water_System_Area_Boundaries.shp')
 zip_geo = gpd.read_file('california_zip_codes/California_Zip_Codes.shp')
-
 ```
 
 # Cleaning Mortality Data
@@ -61,24 +87,64 @@ As we've discussed, I kept only the general cause of mortality. Additionally, I 
 
 # filtering out causes from mortality 
 cause_list = ["ALZ", "CAN", "CLD", "DIA", "HOM", "HTD", "HYP", "INJ", "LIV", "NEP", "PAR", "PNF", "STK", "SUI"]
-mortality = mortality[~mortality["Cause"].isin(cause_list)]
-mortality = mortality.rename(columns={"ZIP_Code": "ZIP_CODE"})
+mortality = (mortality
+            .loc[~mortality["Cause"].isin(cause_list)]
+            .loc[~mortality["Year"].isin([2009, 2010])] # drop rows that are in years 2009 and 2010
+            .rename(columns={"ZIP_Code": "ZIP_CODE"})
+            .reset_index(drop=True)
+)
 
-# drop rows that are in years 2009 and 2010 in mortality
-mortality = mortality[~mortality["Year"].isin([2009, 2010])].reset_index(drop=True)
+def handle_nan_values(mortality, method):
+  if method == 'drop':
+    # Drop rows with NaN values
+    nan_pairs = mortality[mortality['Count'].isna()][['Year', 'ZIP_CODE']]
+    mortality = (mortality
+                .merge(nan_pairs, on=['Year', 'ZIP_CODE'], how='left', indicator=True)
+                .loc[lambda x: x['_merge'] == 'left_only']
+                .drop(columns=['_merge'])
+    )
+  elif method == 'impute_zero':
+    # Impute NaN values with 0
+    mortality["Count"] = mortality["Count"].fillna(0).astype(int)
+  elif method == 'impute_five':
+    # Impute NaN values with 5
+    mortality["Count"] = mortality["Count"].fillna(5).astype(int)
+  else:
+    raise ValueError("Invalid method. Choose from 'drop', 'impute_zero', or 'impute_five'.")
+  
+  return mortality
 
-# filling in NaN values with 0
-mortality["Count"] = mortality["Count"].fillna(0)
+mortality = handle_nan_values(mortality, 'impute_zero')
 
 # mortality with only age as strata 
-mortality_age = mortality[mortality["Strata"] == "Age"].reset_index(drop=True)
+strata_map = {
+    'Under 1 year': 'Under 5 years',
+    '1-4 years': 'Under 5 years', 
+    
+}
+
+mortality_age = (mortality
+                .loc[mortality["Strata"] == "Age"]
+                .drop(columns = ['Strata', 'Cause', 'Cause_Desc'])
+                .reset_index(drop=True)
+                .replace({'Strata_Name': strata_map})
+                .groupby(['Year', 'ZIP_CODE','Strata_Name'], as_index=False, sort = False)['Count']
+                .sum()
+)
 
 # mortality with total population as strata
-mortality_total = mortality[mortality["Strata"] == "Total Population"].reset_index(drop=True)
-mortality_total = mortality_total.drop(columns=["Strata", "Cause", "Cause_Desc"])
+mortality_total = (mortality
+                  .loc[mortality["Strata"] == "Total Population"]
+                  .drop(columns=["Strata", "Cause", "Cause_Desc"])
+                  .sort_values(by="ZIP_CODE", ascending=True)
+                  .reset_index(drop=True)
+)
 
 # mortality with gender as strata
-mortality_gender = mortality[mortality["Strata"] == "Gender"].reset_index(drop=True)
+mortality_gender = (mortality
+                    .loc[mortality["Strata"] == "Gender"]
+                    .reset_index(drop=True)
+)
 
 ```
 
@@ -86,96 +152,75 @@ mortality_gender = mortality[mortality["Strata"] == "Gender"].reset_index(drop=T
 
 I dropped the data in years 2023 and 2024 because we're using mortality data up to 2022. I used the boundaries data to get the zip codes of the office corresponding to each water system. I also stripped the trailing whitespace.
 
+## General Cleaning
 ```{python}
 
 # make a new column in water that gets the year under sample date
-water["Sample Year"] = water["Sample Date"].str.split("-").str[2]
-water = water.drop(columns=["Sample Date"])
+water['Sample Date'] = pd.to_datetime(water['Sample Date'], format='%m-%d-%Y')
+water['Sample Year'] = water['Sample Date'].dt.year
 
 # drop rows that are in years 2023 and 2024
-water = water[~water["Sample Year"].isin(["2023", "2024"])].reset_index(drop=True)
+water = (water
+        .loc[~water["Sample Year"].isin([2023, 2024])]
+        .reset_index(drop=True)
+)
 
 # removing trailing whitespace
-water["Water System Number"] = water["Water System Number"].str.rstrip() 
-water["Analyte Name"] = water["Analyte Name"].str.rstrip() 
-water["Units of Measure"] = water["Units of Measure"].str.rstrip()
-water["Result"] = water["Result"].str.rstrip()
+columns_to_strip = ["Water System Number", "Analyte Name", "Units of Measure", "Result"]
+for column in columns_to_strip:
+    water[column] = water[column].str.rstrip()
 
 # NaN values under result are replaced with reporting level divided by sqrt(2)
-water.loc[water['Result'].isnull() | (water['Result'] == ""), 'Result'] = water.loc[water['Result'].isnull() | (water['Result'] == ""), 'Reporting Level'] / np.sqrt(2)
+mask = water['Result'].isnull() | (water['Result'] == "")
+water.loc[mask, 'Result'] = water.loc[mask, 'Reporting Level'] / np.sqrt(2)
 
 # there shouldn't be any nan values or empty values under 'Result' column
 water['Result'] = water['Result'].astype(float)
-
-# filling in values for 'Less Than Reporting Level' column
- # can be made more efficient (np.select)
-problem = water.loc[(water['Less Than Reporting Level'] == ' ')].copy()  
-problem['Result'] = problem['Result'].astype(float)
-problem.loc[problem['Result'] < problem['Reporting Level'], 'Less Than Reporting Level'] = 'Y'
-problem.loc[problem['Result'] > problem['Reporting Level'], 'Less Than Reporting Level'] = 'N'
-problem.loc[problem['Result'] == problem['Reporting Level'], 'Less Than Reporting Level'] = 'Neither'
-water.update(problem)
-print(water['Less Than Reporting Level'].unique())
-
-# identifying analytes with multiple units of measure
-unique_units = water.groupby('Analyte Name')['Units of Measure'].unique().reset_index()
-multiple = unique_units[unique_units['Units of Measure'].apply(lambda x: len(x) > 1)]
-analytes_w_multiple_units = multiple['Analyte Name']
-
-# fixing units of chloroform
-analyte = 'CHLOROFORM'
-water.loc[(water['Analyte Name'] == 'CHLOROFORM') & (water['Units of Measure'] == ''), 'Units of Measure'] = 'UG/L' # assuming blank space is ug/l
-
-# fixing units of lead
-# dlr and mcl has NaN values that havent' been corrected because not working with them yet
-analyte = 'LEAD'
-water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == ''), 'Units of Measure'] = 'UG/L' # assuming blank space is ug/l because the reporting level of others match
-water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), ['Reporting Level', 'Result','DLR', 'MCL']] *= 1000 # converting mg/l to ug/l
-water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 'Units of Measure'] = 'UG/L'
-
-# fixing units of copper
-# dlr and mcl has NaN values that havent' been corrected because not working with them yet
-analyte = 'COPPER, FREE'
-water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == ''), 'Units of Measure'] = 'UG/L' # assuming blank space is ug/l because the reporting level of others match
-water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), ['Reporting Level', 'Result', 'DLR', 'MCL']] *= 1000 # converting mg/l to ug/l
-water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 'Units of Measure'] = 'UG/L'
-
-# fixing units of nitrite
-# dlr and mcl has NaN values that havent' been corrected because not working with them yet
-analyte = 'NITRITE'
-water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), ['Reporting Level', 'Result', 'DLR', 'MCL']] *= 1000 # converting mg/l to ug/l
-water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 'Units of Measure'] = 'UG/L'
-
-# fixing units of nitrate-nitrite
-# dlr and mcl has NaN values that havent' been corrected because not working with them yet
-analyte = 'NITRATE-NITRITE'
-water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), ['Reporting Level', 'Result', 'DLR', 'MCL']] *= 1000 # converting mg/l to ug/l
-water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 'Units of Measure'] = 'UG/L'
-
-# fixing units of aggressive index
-# dlr and mcl has NaN values that havent' been corrected because not working with them yet
-analyte = 'AGGRESSIVE INDEX'
-water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == ''), 'Units of Measure'] = 'AGGR' # assuming blank space is aggr despite it only have 127 rows of those that are reporting level since other reports from the same water system number have 8 occasionally
-
-water['Sample Year'] = water['Sample Year'].astype(int)
-
 ```
 
+## Fixing Units and Values of Analytes
 ```{python}
+# filling in values for 'Less Than Reporting Level' column
+conditions = [
+    (water['Less Than Reporting Level'] == ' ') & (water['Result'] < water['Reporting Level']),
+    (water['Less Than Reporting Level'] == ' ') & (water['Result'] > water['Reporting Level']),
+    (water['Less Than Reporting Level'] == ' ') & (water['Result'] == water['Reporting Level'])
+]
+choices = ['Y', 'N', 'Neither']
 
-PATH = "/Users/zheng/Downloads/Internships:Work/water.csv"
+water['Less Than Reporting Level'] = np.select(conditions, choices, default=water['Less Than Reporting Level'])
 
-water.to_csv(PATH, index=False)
+# Function to fix units for a specific analyte
+def fix_units(analyte, default_unit, conversion_factor=None):
+    if conversion_factor:
+        water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 
+                  ['Reporting Level', 'Result', 'DLR', 'MCL']] *= conversion_factor
+        water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 
+                  'Units of Measure'] = default_unit
+    water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == ''), # assuming blank units of measure is the one that is most common by checking reporting level
+              'Units of Measure'] = default_unit
 
-water = pd.read_csv("water.csv")
-# shape should be 20199717, 12
+# Mapping analytes to their default units and conversion factors (if any)
+analyte_unit_fixes = { # these analytes were identified to have multiple units of
+    'CHLOROFORM': {'default_unit': 'UG/L'},
+    'LEAD': {'default_unit': 'UG/L', 'conversion_factor': 1000},
+    'COPPER, FREE': {'default_unit': 'UG/L', 'conversion_factor': 1000},
+    'NITRITE': {'default_unit': 'UG/L', 'conversion_factor': 1000},
+    'NITRATE-NITRITE': {'default_unit': 'UG/L', 'conversion_factor': 1000},
+    'AGGRESSIVE INDEX': {'default_unit': 'AGGR'}
+}
 
-asdfsfdfa
+# Applying fixes to each analyte
+for analyte, fix_params in analyte_unit_fixes.items():
+    fix_units(analyte, **fix_params)
+
+# fixing pH
+analyte = 'PH'
+water = water[~((water['Analyte Name'] == 'PH') & (water['Result'] > 14))].reset_index(drop=True)
 
 ```
 
-# Merging Water Data with Boundaries
-
+# Mapping water systems to the zip codes they serve
 ```{python}
 
 # keeping only the relevant columns
@@ -187,29 +232,489 @@ zip_geo = zip_geo.loc[:, ["ZIP_CODE", "geometry"]]
 water_geo['geometry'] = water_geo['geometry'].make_valid()
 zip_geo['geometry'] = zip_geo['geometry'].make_valid()
 
+# changing type
+zip_geo['ZIP_CODE'] = zip_geo['ZIP_CODE'].astype(int)
+
 # ensures same mapping
 zip_geo = zip_geo.to_crs(water_geo.crs)
 
 # the zip codes that each water system serves
-# NEED TO FIX BACK TO LEFT
-water_zip = gpd.sjoin(water_geo, zip_geo, how='left', predicate='intersects')
+water_zip = gpd.sjoin(water_geo, zip_geo, how='inner', predicate='intersects')
 water_zip = water_zip.drop(columns=['index_right', 'geometry']).reset_index(drop=True)
 water_zip["ZIP_CODE"] = water_zip["ZIP_CODE"].astype(int)
 
+# seperate data frame with grouped zip codes
 water_zip_grouped = water_zip.groupby('WATER_SYST')['ZIP_CODE'].apply(lambda x: ', '.join(str(x))).reset_index()
-
 
 ``` 
 
-# Fixed Effects Regression
+# Getting the population data to complement the mortality data
 
 ```{python}
 
+# try county fixed effects
+
+# poisson regression or negative binomial regression specifically for count/rate data, weight by population
+
+# age adjust and population adjust! 
+
+c = Census("9155f8ce1852424ae314d4653b3a8730bb1b87c1")
+
+def calculate_population_by_age_per_sex(given_sex, given_year):
+  
+  # Validate given_sex input
+  if given_sex not in ["male", "female"]:
+      raise ValueError("given_sex must be either 'male' or 'female'")
+      
+  # Determine the field range based on sex
+  if given_sex == "male":
+    sex_range = range(3, 26)
+  else:  # given_sex is "female"
+    sex_range = range(27, 50)
+
+  # Create field list for the API request
+  field_list = ['NAME'] + [f'B01001_{str(i).zfill(3)}E' for i in sex_range]
+  
+  # Fetch data from the API
+  ca_pop = c.acs5.state_zipcode(
+    fields = tuple(field_list), 
+    state_fips = '06',  
+    zcta = '*',
+    year = given_year
+    )
+
+  ca_pop = pd.DataFrame(ca_pop)
+  ca_pop = ca_pop.rename(columns={"zip code tabulation area": "ZIP_CODE"})
+  ca_pop['ZIP_CODE'] = ca_pop['ZIP_CODE'].astype(int)
+
+  # Define age group column names
+  age_groups = {
+      "Under 5 years": 1,
+      "5-14 years": (2, 3),
+      "15-24 years": (4, 8),
+      "25-34 years": (9, 10),
+      "35-44 years": (11, 12),
+      "45-54 years": (13, 14),
+      "55-64 years": (15, 17),
+      "65-74 years": (18, 20),
+      "75-84 years": (21, 22),
+      "85 years and over": 23
+  }
+
+  # Aggregate age groups
+  for group, cols in age_groups.items():
+      if isinstance(cols, tuple):
+          ca_pop[group] = ca_pop.iloc[:, cols[0]:cols[1] + 1].sum(axis=1)
+      else:
+          ca_pop[group] = ca_pop.iloc[:, cols]
+
+  # Select relevant columns
+  ca_pop = ca_pop[["ZIP_CODE"] + list(age_groups.keys())]
+  ca_pop = ca_pop.astype(int)
+
+  # Melt the DataFrame
+  melted_pop = ca_pop.melt(
+      id_vars=["ZIP_CODE"],
+      var_name="Strata_Name",
+      value_name="Population"
+  ).reset_index(drop=True)
+
+  # Order the categories
+  order = list(age_groups.keys())
+  melted_pop["Strata_Name"] = pd.Categorical(melted_pop["Strata_Name"], categories=order, ordered=True)
+  melted_pop = melted_pop.sort_values(by=["ZIP_CODE", "Strata_Name"]).reset_index(drop=True)
+
+  # Add the year column
+  melted_pop['Year'] = given_year
+
+  return melted_pop
+
+def calculate_population_by_age(given_year):
+  male_pop = calculate_population_by_age_per_sex('male', given_year)
+  female_pop = calculate_population_by_age_per_sex('female', given_year)
+
+  # Merge the two DataFrames on 'ZIP_CODE' and sum the populations
+  total_pop = pd.merge(male_pop, female_pop, on=['ZIP_CODE', 'Strata_Name'], suffixes=('_male', '_female'))
+  total_pop['Population'] = total_pop['Population_male'] + total_pop['Population_female']
+  total_pop = total_pop[['ZIP_CODE', 'Strata_Name', 'Population']]
+  
+  # Add the year column
+  total_pop['Year'] = given_year
+
+  return total_pop
+
+years = range(2011, 2023)
+
+def calculate_population(given_year_range):
+  # Collect all DataFrames in a list  
+  population_list = [calculate_population_by_age(year) for year in given_year_range]
+  
+  # Concatenate all DataFrames at once
+  population = pd.concat(population_list, ignore_index=True)
+  
+  # Remove zip codes with 0 population in all strata
+  population = (population
+                .groupby(['Year', 'ZIP_CODE'])
+                .filter(lambda x: (x['Population'] != 0).any())
+  )
+
+
+  # i originally stopped here but the count data said there were deaths while acs said the population is 0
+
+  return population
+
+population_df = calculate_population(years)
+
+# # graphing
+# # Group the data by 'Strata_Name' and count the number of zeros in each group
+# zero_counts = population_df.groupby('Strata_Name')['Population'].apply(lambda x: (x == 0).sum())
+
+# # Plot the distribution of zero counts
+# plt.bar(zero_counts.index, zero_counts.values)
+# plt.xlabel('Strata_Name')
+# plt.ylabel('Number of Zeros')
+# plt.title('Distribution of Number of Zeros for each Strata_Name')
+# plt.xticks(rotation=90)
+# plt.show()
+
+
+
+# 3 min to run
+```
+
+# Unused Code
+```{python}
+def get_total_ca_population(given_year):
+  x = c.acs5.state(
+    fields = 'B01001_001E', 
+    state_fips = '06', 
+    year = given_year
+    )
+  x = pd.DataFrame(x)
+  total_ca_pop = x['B01001_001E'][0]
+  return x
+
+def get_avg_population_by_age():
+  df = test.copy()
+  df = df.groupby(['Year', 'Strata_Name'])['Population'].mean().reset_index()
+  df.rename(columns={"Population": "Avg CA Population"}, inplace=True)
+
+  return df
+
+avg_by_age = get_avg_population_by_age()
+
+test = pd.merge(test, avg_by_age, on=['Year', 'Strata_Name'], how='left')
+test['Expected Count'] = test['Avg CA Population'] * test['Mortality_Rate_By_Age']
+
+temp_count = test.groupby(['Year', 'ZIP_CODE'])['Expected Count'].sum().reset_index()
+temp_population = test.groupby(['Year', 'ZIP_CODE'])['Avg CA Population'].sum().reset_index()
+
+temp = pd.merge(temp_count, temp_population, on=['Year', 'ZIP_CODE'], how='left')
+temp['Adjusted_Mortality_Rate'] = temp['Expected Count'] / temp['Avg CA Population']
+
+```
+
+# Getting 2000 US Standard Population
+```{python}
+
+import pandas as pd
+
+# Path to the file
+file_path = 'stdpop.18ages.txt'
+
+# Initialize lists to store the parsed data
+age_groups = []
+populations = []
+
+# Read the file and process the lines
+with open(file_path, 'r') as file:
+    for line in file:
+        if line.startswith('204'):
+            age_group = int(line[3:6])  # Extract age group (001 to 018)
+            population = int(line[6:])  # Extract population
+            age_groups.append(age_group)
+            populations.append(population)
+
+# Create a DataFrame
+std2000 = pd.DataFrame({
+    'Strata_Name': age_groups,
+    '2000 US Standard Population': populations
+})
+
+# Map age group numbers to their corresponding age ranges
+age_group_map = {
+    1: 'Under 5 years',
+    2: '5-14 years', 3: '5-14 years', # 2 actually maps to 5-9 and 3 maps to 10-14 but this is done to aggregate later
+    4: '15-24 years', 5: '15-24 years',
+    6: '25-34 years', 7: '25-34 years',
+    8: '35-44 years', 9: '35-44 years',
+    10: '45-54 years', 11: '45-54 years',
+    12: '55-64 years', 13: '55-64 years',
+    14: '65-74 years', 15: '65-74 years',
+    16: '75-84 years', 17: '75-84 years',
+    18: '85 years and over'
+}
+
+std2000['Strata_Name'] = std2000['Strata_Name'].map(age_group_map)
+
+# Aggregate the population by the new age groups
+std2000 = std2000.groupby('Strata_Name', as_index=False, sort = False)['2000 US Standard Population'].sum()
+
+# Display the DataFrame
+display(std2000)
+
+```
+
+# Setting up mortality data for regressions
+```{python}
+
+# join population and mortality_age on zip code
+test = pd.merge(mortality_age, population_df, on=["ZIP_CODE", "Year", "Strata_Name"], how="inner")
+
+# handling cases where the population is less than the count
+test.loc[test['Count'] > test['Population'], 'Population'] = test['Count'] * 2
+
+# adding standard population
+test = pd.merge(test, std2000, on='Strata_Name', how='left')
+
+# 2301 values are the ones imputed with 5 (assuming imputation of 5)
+# 7 values have mortality count of 11
+# 3 values of mortality count of 12,13,15
+# 2 values of mortality count of 14
+# 1 value of mortality count of 22
+# so we're setting the values where population is less than count to the population (0)
+
+test['Mortality_Rate'] = test['Count'] / test['Population']
+test['Expected Count'] = test['2000 US Standard Population'] * test['Mortality_Rate']
+
+total_test = (
+    test.groupby(['Year', 'ZIP_CODE'])
+    .agg({
+      'Count': 'sum', 
+      'Population': 'sum', 
+      '2000 US Standard Population': 'sum', 
+      'Expected Count': 'sum'
+      })
+    .reset_index()
+)
+
+total_test['Mortality_Rate'] = total_test['Count'] / total_test['Population']
+total_test['Adjusted_Mortality_Rate'] = total_test['Expected Count'] / total_test['2000 US Standard Population']
+
+
+```
+
+# Regressions
+```{python}
+
 # join mortality_total and water_zip on zip code
-df = pd.merge(mortality_total, water_zip, on="ZIP_CODE", how="inner")
+# this creates a dataframe where zip_codes with multiple water systems are repeated for each water system and their respective (same) count
 
-mortality_total.sort_values(by="ZIP_CODE", ascending=True)
+def get_analyte_concentration(water, given_analyte):
 
+  analyte_water = (water
+                  .loc[water['Analyte Name'] == given_analyte]
+                  .groupby(['Sample Year', 'Water System Number'])['Result']
+                  .median()
+                  .reset_index()
+                  .rename(columns={"Water System Number": "WATER_SYST", "Sample Year": "Year"})
+                  .sort_values(by=['WATER_SYST', 'Year'], ascending=[True, True])
+                  .reset_index(drop=True)
+  )
+  return analyte_water
+
+
+def fixed_effects_regression(mortality_data, mortality_measurement, given_analyte):
+   # Get the analyte concentrations
+  analyte_water = get_analyte_concentration(water, given_analyte)
+
+  complete = (pd
+              .merge(mortality_data, water_zip, on="ZIP_CODE", how="inner")
+              .merge(analyte_water, how='inner', on=['WATER_SYST', 'Year'])
+              .drop(columns=['WATER_SYST'])
+              .set_index(['ZIP_CODE', 'Year'])
+  )
+  
+  # Identify and remove rows where 'Result' is 0
+  missing_rows = complete[complete['Result'] == 0].shape[0]
+  print("Number of rows where Result is 0:", missing_rows)
+  complete = complete.loc[complete['Result'] != 0]
+  
+  y = complete[mortality_measurement]
+  x = complete['Result']
+  
+  mod = PanelOLS(
+    y, 
+    x, 
+    entity_effects=True, 
+    time_effects=True
+    )
+  twfe = mod.fit()
+
+  return twfe
+
+def poisson_regression(mortality_data, mortality_measurement, given_analyte, offset):
+   # Get the analyte concentrations
+  analyte_water = get_analyte_concentration(water, given_analyte)
+
+  complete = (pd
+              .merge(mortality_data, water_zip, on="ZIP_CODE", how="inner")
+              .merge(analyte_water, how='inner', on=['WATER_SYST', 'Year'])
+              .drop(columns=['WATER_SYST'])
+              .assign(intercept=1)
+  )
+  
+  # Identify and remove rows where 'Result' is 0
+  missing_rows = complete[complete['Result'] == 0].shape[0]
+  print("Number of rows where Result is 0:", missing_rows)
+  complete = complete.loc[complete['Result'] != 0]
+  
+  y = complete[mortality_measurement]
+
+  x = complete[['intercept','Result']]
+  
+  mod = sm.GLM(
+    y,
+    x,
+    offset=np.log(complete[offset]),
+    family=sm.families.Poisson()
+  )
+
+  twfe = mod.fit()
+  print(twfe.params)
+
+  # f, axes = plt.subplots(1, 2, figsize=(17, 6))
+  # axes[0].plot(y, twfe.resid_response, 'o')
+  # axes[0].set_ylabel("Residuals")
+  # axes[0].set_xlabel("$y$")
+  # axes[1].plot(y, twfe.resid_pearson, 'o')
+  # axes[1].axhline(y=-1, linestyle=':', color='black', label=r'$\pm 1$')
+  # axes[1].axhline(y=+1, linestyle=':', color='black')
+  # axes[1].set_ylabel("Standardized residuals")
+  # axes[1].set_xlabel("$y$")
+  # plt.legend()
+  # plt.show()
+
+  return twfe.summary()
+
+
+def nb_regression(mortality_data, mortality_measurement, given_analyte):
+   # Get the analyte concentrations
+  analyte_water = get_analyte_concentration(water, given_analyte)
+
+  complete = (pd
+              .merge(mortality_data, water_zip, on="ZIP_CODE", how="inner")
+              .merge(analyte_water, how='inner', on=['WATER_SYST', 'Year'])
+              .drop(columns=['WATER_SYST'])
+              .assign(intercept=1)
+  )
+  
+  # Identify and remove rows where 'Result' is 0
+  missing_rows = complete[complete['Result'] == 0].shape[0]
+  print("Number of rows where Result is 0:", missing_rows)
+  complete = complete.loc[complete['Result'] != 0]
+  
+  y = complete[mortality_measurement]
+
+  x = complete[['intercept','Result']]
+  
+  mod = sm.GLM(
+    y,
+    x,
+    family=sm.families.NegativeBinomial()
+  )
+
+  twfe = mod.fit()
+  print(twfe.params)
+
+  # f, axes = plt.subplots(1, 2, figsize=(17, 6))
+  # axes[0].plot(y, twfe.resid_response, 'o')
+  # axes[0].set_ylabel("Residuals")
+  # axes[0].set_xlabel("$y$")
+  # axes[1].plot(y, twfe.resid_pearson, 'o')
+  # axes[1].axhline(y=-1, linestyle=':', color='black', label=r'$\pm 1$')
+  # axes[1].axhline(y=+1, linestyle=':', color='black')
+  # axes[1].set_ylabel("Standardized residuals")
+  # axes[1].set_xlabel("$y$")
+  # plt.legend()
+  # plt.show()
+
+  return twfe.summary()
+
+```
+
+```{python}
+
+mortality_measurement = 'Adjusted_Mortality_Rate'
+analyte = 'COPPER, FREE'
+analyte = 'LEAD'
+mortality_data = total_test[['Year', 'ZIP_CODE', mortality_measurement]]
+
+fixed_effects_regression(mortality_data, mortality_measurement, analyte)
+
+
+mortality_measurement = 'Count'
+analyte = 'LEAD'
+offset = 'Population'
+mortality_data = total_test.copy()
+
+poisson_regression(mortality_data, mortality_measurement, analyte, offset)
+
+mortality_measurement = 'Count'
+analyte = 'LEAD'
+mortality_data = total_test.copy()
+
+nb_regression(mortality_data, mortality_measurement, analyte) 
+
+```
+
+```{python}
+
+# checking for outliers
+import matplotlib.pyplot as plt
+
+plt.hist(analyte_water['Result'], bins=10, range=(analyte_water['Result'].min(), analyte_water['Result'].max()))
+plt.xlabel('Analyte Result')
+plt.ylabel('Frequency')
+plt.title('Histogram of Analyte Results')
+plt.yscale('log')
+plt.show()
+
+```
+
+# making original.csv
+```{python}
+original["Analyte Name"] = original["Analyte Name"].str.rstrip() 
+original["Result"] = original["Result"].str.rstrip()
+
+original["Sample Year"] = original["Sample Date"].str.split("-").str[2]
+original = original.drop(columns=["Sample Date"])
+
+original = original[~original["Sample Year"].isin(["2023", "2024"])].reset_index(drop=True)
+
+original['Result'] = pd.to_numeric(original['Result'], errors='coerce')
+
+original.to_csv("original.csv", index=False)
+```
+
+```{python}
+
+#  what to do about PH level of 0 since the reporting level is also 0 
+# when looking at outliers, the value we set using reporting level is the max a lot of the time
+
+top_analytes = water['Analyte Name'].unique()[:5]
+
+for analyte in top_analytes:
+  analyte_data = water[water['Analyte Name'] == analyte]
+  top_rows = analyte_data.nlargest(5, 'Result')
+  print(f"Top 5 rows for {analyte}:")
+  display(top_rows)
+
+
+```
+
+# zip code problem
+```{python}
 # Compare the unique zip codes in mortality_total and zip_geo
 mortality_zip_codes = mortality_total["ZIP_CODE"].unique()
 zip_geo_codes = zip_geo["ZIP_CODE"].unique()
@@ -223,106 +728,35 @@ extra_zip_codes = set(zip_geo_codes) - set(mortality_zip_codes)
 # Print the missing and extra zip codes
 print("Missing zip codes:", missing_zip_codes)
 print("Extra zip codes:", extra_zip_codes)
-len(missing_zip_codes)
-len(extra_zip_codes)
+print(len(missing_zip_codes))
+print(len(extra_zip_codes))
 
-mortality_total.loc[mortality_total["ZIP_CODE"] == 92161]
-zip_geo.loc[zip_geo["ZIP_CODE"] == 92161]
-
-
-# calculate the average count every year of each water system using zip codes
-average_count = df.groupby(['WATER_SYST', 'Year'])['Count'].mean().reset_index()
 
 ```
 
 ```{python}
-
-# try county fixed effects
-
-# reading up on calculating age adjusted mortality rates 
-
-# checking for outliers in the data
-
-# poisson regression or negative binomial regression specifically for count/rate data, weight by population
-
-# age adjust and population adjust! 
-
-```
-
-```{python}
-
-# getting the chloroform concentration for each water system for each year
-analyte = 'LEAD'
-analyte_water = water.loc[water['Analyte Name'] == analyte].copy().reset_index(drop=True)
-
-analyte_water = analyte_water.groupby(['Water System Number', 'Sample Year'])['Result'].median().reset_index() # median because probably not normally distributed
-
-analyte_water = analyte_water.rename(columns={"Water System Number": "WATER_SYST", "Sample Year": "Year"})
 
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
 
-plt.hist(analyte_water['Result'], bins=10, range=(analyte_water['Result'].min(), analyte_water['Result'].max()))
-plt.xlabel('Analyte Result')
-plt.ylabel('Frequency')
-plt.title('Histogram of Analyte Results')
-plt.yscale('log')
-plt.show()
+url = "http://www.stat.columbia.edu/~gelman/arm/examples/police/frisk_with_noise.dat" 
+df = pd.read_csv(url, skiprows=6, delimiter=" ")
+df.head()
 
-lead_high_concentration = water[(water['Analyte Name'] == 'LEAD') & (water['Result'] > 300)]
-display(lead_high_concentration)
-water.dtypes
+X = (df
+    .groupby(['eth', 'precinct'])[["stops", "past.arrests"]]
+    .sum()
+    .reset_index()
+    .pipe(pd.get_dummies, columns=['eth', 'precinct'])
+    .assign(intercept=1)  # Adds a column called 'intercept' with all values equal to 1.
+    .sort_values(by='stops')
+    .reset_index(drop=True)
+)
 
-water.loc[(water['Water System Number'] == 'CA3510001') & (water['Analyte Name'] == 'LEAD')].sort_values(by='Result')
+y = X.pop("stops")
 
-# FIND OUTLIERSS LIKE IN THE LINE BEFORE THIS ONE. when restarting, change it back to water2 and see if the outliers are because of you
-
-```
-```{python}
-
-```
-
-
-```{python}
-
-# inner because not every water system is 
-merged_data = pd.merge(df, analyte_water, how = 'inner', on=['WATER_SYST', 'Year'])
-
-# show rows with NaN values
-df[df.isnull().any(axis=1)]
-
-# drop Strata_Name and WATER_SYST
-merged_data = merged_data.drop(columns=['Strata_Name', 'WATER_SYST'])
-
-merged_data = merged_data.set_index(['ZIP_CODE', 'Year'])
-
-display(merged_data)
-
+X
 
 ```
-
-```{python}
-
-from linearmodels import PanelOLS
-
-mod = PanelOLS.from_formula(
-  "Count ~ Result + EntityEffects + TimeEffects", merged_data)
-
-twfe = mod.fit()
-print(twfe)
-
-```
-
-# Viewing water systems with multiple geometries
-
-```{python}
-
-water_duplicates = water_geo[water_geo.duplicated(keep = False, subset = ["WATER_SYST"])]
-
-water_system_zip_codes = water_geo[water_geo['WATER_SYST'].isin(water_duplicates['WATER_SYST'])]
-
-water_system_zip_codes
-
-```
-
-
-
