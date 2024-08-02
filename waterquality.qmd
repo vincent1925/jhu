@@ -33,7 +33,6 @@ plt.style.use("ggplot")
 PATH = "/Users/zheng/Downloads/Internships:Work/water.csv"
 
 # water = pd.read_csv(PATH)
-
 ```
 
 
