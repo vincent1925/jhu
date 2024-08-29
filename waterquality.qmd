@@ -1,4 +1,3 @@
----
 title: "Water Quality Draft"
 author: "Vincent Zheng"
 date: 6/25/2024"
@@ -10,7 +9,6 @@ format:
     code-tools: 
       source: true
       toggle: true
----
 
 ```{python}
 
@@ -21,22 +19,19 @@ import matplotlib.pyplot as plt
 from linearmodels import PanelOLS
 from census import Census
 import statsmodels.api as sm
-
+import statsmodels.formula.api as smf
 
 pd.set_option('display.max_columns', None)
-pd.set_option('display.max_rows', 50)
+pd.set_option('display.max_rows', 60)
+pd.set_option("display.float_format", lambda x: "{:.5f}".format(x))
 
-pd.set_option("display.float_format", lambda x: "{:.3f}".format(x))
 plt.style.use("ggplot")
-
 
 PATH = "/Users/zheng/Downloads/Internships:Work/water.csv"
 
 # water = pd.read_csv(PATH)
 
 ```
-
-
 
 # issues
 - the number of watersystems in water data is different from the number of watersystems in water_geo data
@@ -46,44 +41,231 @@ _ the number of zip codes in zip_geo is different from the mortality data. morta
 before i ran the regressions, i was going over my code to make sure i didn't make any bad assumptions mistakes. i remembered that i set all suppressed mortality count data to 0 so i could move on. how should i approach this? i know there are packages in r to simulate suppressed data
 
 
-# Getting the tables
+# California Water Quality Data
+
+The data is obtained from (https://www.waterboards.ca.gov/drinking_water/certlic/drinkingwater/EDTlibrary.html "this page") from the State Water Resources Control Board from January 1, 2011 to present. However, I'll only be using data up until 2022.
+
+For NaN results in the 'Result' column, I replaced them with the Reporting Level divided by the square root of 2 as is common practice.
+
+For sake of thoroughness, I filled in the 'Less Than Reporting Level' by comparing 'Result' to 'Reporting Level'.
+
+To account for varying units, I identified those analytes that had multiple units of measure and converted them to the most common unit of measure. For those that didn't have a unit of measure, I deduced the unit by using the 'Reporting Level'.
+
+I also dropped the pH values that were greater than 14, assumning that they were errors.
+
+in the meantime, i was reviewing different aspects of the regression. i'm not sure if i should be concerned about imputing nan values for analyte concentration using reportinglevel/sqrt2 because 78% of the data 
+
 ```{python}
 
-# water quality data
-cols = ['Water System Number', 
-        'Population Served', 
-        'Sampling Point Name', 
-        'Sample Date', 
-        'Analyte Name', 
-        'Result', 
-        'Counting Error', 
-        'Units of Measure', 
-        'Less Than Reporting Level', 
-        'Reporting Level', 
-        'DLR', 
-        'MCL'
-        ]
-water1 = pd.read_table("california_water_systems/SDWIS1.tab", encoding="ISO-8859-1", usecols=cols, dtype={20: str})
-water2 = pd.read_table("california_water_systems/SDWIS2.tab", encoding="ISO-8859-1", usecols=cols, dtype={20: str})
-water3 = pd.read_table("california_water_systems/SDWIS3.tab", encoding="ISO-8859-1", usecols=cols, dtype={20: str})
-water4 = pd.read_table("california_water_systems/SDWIS4.tab", encoding="ISO-8859-1", usecols=cols, dtype={20: str})
-water = pd.concat([water1, water2, water3, water4], ignore_index=True)
+# Data files
+files = [f"california_water_systems/SDWIS{i}.tab" for i in range(1, 5)]
 
-# mortality data
+# List of columns to read
+cols = ['Water System Number', 'Population Served', 'Sampling Point Name', 'Sample Date', 'Analyte Name', 'Result', 'Counting Error', 'Units of Measure', 'Less Than Reporting Level', 'Reporting Level', 'DLR', 'MCL']
+
+# Read and concatenate all files
+water = pd.concat(
+    [pd.read_table(file, encoding="ISO-8859-1", usecols=cols, dtype={20: str}) for file in files],
+    ignore_index=True
+)
+
+# Make a new column in water that gets the year under sample date
+water['Sample Date'] = pd.to_datetime(water['Sample Date'], format='%m-%d-%Y')
+water['Sample Year'] = water['Sample Date'].dt.year
+
+# Drop rows that are in years 2023 and 2024
+water = (water
+        .loc[~water["Sample Year"].isin([2023, 2024])]
+        .reset_index(drop=True)
+)
+
+# Remove trailing whitespace
+columns_to_strip = ["Water System Number", "Analyte Name", "Units of Measure", "Result"]
+for column in columns_to_strip:
+    water[column] = water[column].str.rstrip()
+
+water['Result'] = pd.to_numeric(water['Result'].replace("", np.nan), errors='coerce')
+
+water = (water
+        .groupby('Analyte Name')
+        .filter(lambda x: x['Result'].notna().any())
+)
+##### 
+
+nan_percentage = water.groupby('Analyte Name')['Result'].apply(lambda x: x.isnull().mean() * 100)
+nan_percentage = (nan_percentage
+                  .reset_index()
+                  .rename(columns={'Result': 'NaN Percentage'})
+                  .sort_values(by='NaN Percentage', ascending=False)
+                  .reset_index(drop=True)
+)
+
+######## 
+
+water_copy = water.copy()
+
+analyte_names = water['Analyte Name'].unique()
+nan_percentages = []
+
+# Calculate the percentage of NaN values after dropping each analyte
+for analyte in analyte_names:
+    water_copy = water_copy[water_copy['Analyte Name'] != analyte]
+    nan_rows_percentage = water_copy['Result'].isna().sum() / len(water) * 100
+    nan_percentages.append(nan_rows_percentage)
+
+# Create a DataFrame to hold the results
+nan_percentage_df = pd.DataFrame({
+    'Analyte': analyte_names,
+    'NaN Percentage': nan_percentages
+})
+
+#########
+
+analyte_nan = water_copy.groupby('Analyte Name')['Result'].apply(lambda x: x.isnull().sum() )
+analyte_nan = analyte_nan.reset_index().rename(columns={'Result': 'NaN Percentage'}).sort_values(by='NaN Percentage', ascending=False).reset_index(drop=True)
+
+analyte_nan.loc[analyte_nan['NaN Percentage'] > 50]
+
+plt.figure(figsize=(12, 8))
+plt.bar(analyte_nan['Analyte Name'], analyte_nan['NaN Percentage'], color='skyblue')
+plt.xlabel('Analyte')
+plt.ylabel('Percentage of NaN Values')
+plt.title('Percentage of NaN Values in Result Column by Analyte')
+plt.xticks(rotation=45)
+plt.show()
+
+water['Result'] = water['Result'].astype(float)
+
+#########
+
+
+# NaN values under Result are replaced with Reporting Level/sqrt(2)
+mask = water['Result'].isnull()
+water.loc[mask, 'Result'] = water.loc[mask, 'Reporting Level'] / np.sqrt(2)
+
+# Making 'Result' column float
+water['Result'] = water['Result'].astype(float)
+
+# filling in values for 'Less Than Reporting Level' column
+conditions = [
+    (water['Less Than Reporting Level'] == ' ') & (water['Result'] < water['Reporting Level']),
+    (water['Less Than Reporting Level'] == ' ') & (water['Result'] > water['Reporting Level']),
+    (water['Less Than Reporting Level'] == ' ') & (water['Result'] == water['Reporting Level'])
+]
+choices = ['Y', 'N', 'Neither']
+
+water['Less Than Reporting Level'] = np.select(conditions, choices, default=water['Less Than Reporting Level'])
+
+# Function to fix units for a specific analyte
+def fix_units(analyte, default_unit, conversion_factor=None):
+    if conversion_factor:
+        water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 
+                  ['Reporting Level', 'Result', 'DLR', 'MCL']] *= conversion_factor
+        water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 
+                  'Units of Measure'] = default_unit
+    water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == ''), # assuming blank units of measure is the one that is most common by checking reporting level
+              'Units of Measure'] = default_unit
+
+# Mapping analytes to their default units and conversion factors (if any)
+
+analyte_unit_fixes = {
+    'CHLOROFORM': {'default_unit': 'UG/L'},
+    'LEAD': {'default_unit': 'UG/L', 'conversion_factor': 1000},
+    'COPPER, FREE': {'default_unit': 'UG/L', 'conversion_factor': 1000},
+    'NITRITE': {'default_unit': 'UG/L', 'conversion_factor': 1000},
+    'NITRATE-NITRITE': {'default_unit': 'UG/L', 'conversion_factor': 1000},
+    'AGGRESSIVE INDEX': {'default_unit': 'AGGR'}
+} # these analytes were identified to have multiple units of measure
+
+# Applying fixes to each analyte
+for analyte, fix_params in analyte_unit_fixes.items():
+    fix_units(analyte, **fix_params)
+
+# fixing pH
+analyte = 'PH'
+water = water[~((water['Analyte Name'] == 'PH') & (water['Result'] > 14))].reset_index(drop=True)
+
+# saving file
+water.to_csv("water.csv", index=False)
+
+```
+
+```{python}
+water = pd.read_csv("water.csv")
+
+def find_outliers_z_score(data, threshold=3):
+    mean = np.mean(data)
+    std = np.std(data)
+    z_scores = (data - mean) / std
+    outliers = np.where(np.abs(z_scores) > threshold)[0]
+    return outliers
+
+def find_analyte_outliers_z_score(df, analyte_column='Analyte Name', result_column='Result', threshold=3):
+    outliers_dict = {}
+    analytes = df[analyte_column].unique()
+    
+    for analyte in analytes:
+        analyte_data = df[df[analyte_column] == analyte][result_column]
+        outliers_idx = find_outliers_z_score(analyte_data, threshold)
+        outliers = df[df[analyte_column] == analyte].iloc[outliers_idx]
+        outliers_dict[analyte] = outliers
+    
+    return outliers_dict
+
+# Assuming `water` is your DataFrame
+analyte_outliers = find_analyte_outliers_z_score(water)
+
+def convert_dict_to_df(analyte_outliers):
+    outliers_list = []
+    
+    for analyte, outliers in analyte_outliers.items():
+        if not outliers.empty:
+            outliers['Analyte Name'] = analyte
+            outliers_list.append(outliers)
+    
+    if outliers_list:
+        combined_outliers_df = pd.concat(outliers_list, ignore_index=True)
+    else:
+        combined_outliers_df = pd.DataFrame()
+    
+    return combined_outliers_df
+
+# Convert the analyte_outliers dict to a single DataFrame
+analyte_outliers_df = convert_dict_to_df(analyte_outliers)
+
+analyte_outliers_df.loc[analyte_outliers_df['Analyte Name'] == 'PERFLUOROPENTANESULFONIC ACID (PFPES)']
+import matplotlib.pyplot as plt
+
+# Select the data for the specific analyte
+pfpes_data = water.loc[water['Analyte Name'] == 'PERFLUOROPENTANESULFONIC ACID (PFPES)']
+
+# Plot the histogram
+for analyte in analyte_outliers_df['Analyte Name'].unique():
+    analyte_data = water.loc[water['Analyte Name'] == analyte]
+    plt.hist(analyte_data['Result'], bins=10)
+    plt.xlabel('Result')
+    plt.ylabel('Frequency')
+    plt.title(f'Histogram of {analyte} Result')
+    plt.show()
+
+
+```
+
+# California Mortality Data
+The mortality data is obtained from (https://data.ca.gov/dataset/death-profiles-by-zip-code "this page") from the California Open Data Portal. The data is from 2009 to 2022 but the years 2009 and 2010 were dropped. 
+
+There are NaN values in the dataset because some data were suppressed for small numbers (<11). To deal with this, I wrote code that allowed you to select to put values with 0 or the mean, 5. When imputing with 5, one must make sure that the mortality count is lower than the population.
+
+I focused on deaths from all causes. Under that, I separated the data into three groups: age, total population, and gender.
+
+For the age group, I combined the subcategories <1 year and 1-4 years into 'Under 5 years' to match the popualation data that I have.
+
+```{python}
+
 cols = ['Year','ZIP_Code','Strata','Strata_Name','Cause','Cause_Desc','Count','Annotation_Code','Annotation_Desc' ] # dropped 'Annotation_Code','Annotation_Desc','Data_Revision_Date','ICD_Revision', 'Geography_Type'
 mortality1 = pd.read_csv("california_mortality/cali_deaths_2009-2018.csv", usecols=cols)
 mortality2 = pd.read_csv("california_mortality/cali_deaths_2019-2022.csv", usecols=cols)
 mortality = pd.concat([mortality1, mortality2], ignore_index=True)
-
-water_geo = gpd.read_file('California_Drinking_Water_System_Area_Boundaries/California_Drinking_Water_System_Area_Boundaries.shp')
-zip_geo = gpd.read_file('california_zip_codes/California_Zip_Codes.shp')
-```
-
-# Cleaning Mortality Data
-
-As we've discussed, I kept only the general cause of mortality. Additionally, I seperated out the strata by gender, age, and total. We'll be focusing on age and I'll be adjusting mortality rates for age in the future. I dropped the data in years 2009 and 2010 because we're using water data starting from 2011.
-
-```{python}
 
 # filtering out causes from mortality 
 cause_list = ["ALZ", "CAN", "CLD", "DIA", "HOM", "HTD", "HYP", "INJ", "LIV", "NEP", "PAR", "PNF", "STK", "SUI"]
@@ -94,6 +276,7 @@ mortality = (mortality
             .reset_index(drop=True)
 )
 
+# imputing NaN values
 def handle_nan_values(mortality, method):
   if method == 'drop':
     # Drop rows with NaN values
@@ -122,7 +305,6 @@ strata_map = {
     '1-4 years': 'Under 5 years', 
     
 }
-
 mortality_age = (mortality
                 .loc[mortality["Strata"] == "Age"]
                 .drop(columns = ['Strata', 'Cause', 'Cause_Desc'])
@@ -148,80 +330,11 @@ mortality_gender = (mortality
 
 ```
 
-# Cleaning Water Data
-
-I dropped the data in years 2023 and 2024 because we're using mortality data up to 2022. I used the boundaries data to get the zip codes of the office corresponding to each water system. I also stripped the trailing whitespace.
-
-## General Cleaning
-```{python}
-
-# make a new column in water that gets the year under sample date
-water['Sample Date'] = pd.to_datetime(water['Sample Date'], format='%m-%d-%Y')
-water['Sample Year'] = water['Sample Date'].dt.year
-
-# drop rows that are in years 2023 and 2024
-water = (water
-        .loc[~water["Sample Year"].isin([2023, 2024])]
-        .reset_index(drop=True)
-)
-
-# removing trailing whitespace
-columns_to_strip = ["Water System Number", "Analyte Name", "Units of Measure", "Result"]
-for column in columns_to_strip:
-    water[column] = water[column].str.rstrip()
-
-# NaN values under result are replaced with reporting level divided by sqrt(2)
-mask = water['Result'].isnull() | (water['Result'] == "")
-water.loc[mask, 'Result'] = water.loc[mask, 'Reporting Level'] / np.sqrt(2)
-
-# there shouldn't be any nan values or empty values under 'Result' column
-water['Result'] = water['Result'].astype(float)
-```
-
-## Fixing Units and Values of Analytes
-```{python}
-# filling in values for 'Less Than Reporting Level' column
-conditions = [
-    (water['Less Than Reporting Level'] == ' ') & (water['Result'] < water['Reporting Level']),
-    (water['Less Than Reporting Level'] == ' ') & (water['Result'] > water['Reporting Level']),
-    (water['Less Than Reporting Level'] == ' ') & (water['Result'] == water['Reporting Level'])
-]
-choices = ['Y', 'N', 'Neither']
-
-water['Less Than Reporting Level'] = np.select(conditions, choices, default=water['Less Than Reporting Level'])
-
-# Function to fix units for a specific analyte
-def fix_units(analyte, default_unit, conversion_factor=None):
-    if conversion_factor:
-        water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 
-                  ['Reporting Level', 'Result', 'DLR', 'MCL']] *= conversion_factor
-        water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == 'MG/L'), 
-                  'Units of Measure'] = default_unit
-    water.loc[(water['Analyte Name'] == analyte) & (water['Units of Measure'] == ''), # assuming blank units of measure is the one that is most common by checking reporting level
-              'Units of Measure'] = default_unit
-
-# Mapping analytes to their default units and conversion factors (if any)
-analyte_unit_fixes = { # these analytes were identified to have multiple units of
-    'CHLOROFORM': {'default_unit': 'UG/L'},
-    'LEAD': {'default_unit': 'UG/L', 'conversion_factor': 1000},
-    'COPPER, FREE': {'default_unit': 'UG/L', 'conversion_factor': 1000},
-    'NITRITE': {'default_unit': 'UG/L', 'conversion_factor': 1000},
-    'NITRATE-NITRITE': {'default_unit': 'UG/L', 'conversion_factor': 1000},
-    'AGGRESSIVE INDEX': {'default_unit': 'AGGR'}
-}
-
-# Applying fixes to each analyte
-for analyte, fix_params in analyte_unit_fixes.items():
-    fix_units(analyte, **fix_params)
-
-# fixing pH
-analyte = 'PH'
-water = water[~((water['Analyte Name'] == 'PH') & (water['Result'] > 14))].reset_index(drop=True)
-
-```
-
 # Mapping water systems to the zip codes they serve
 ```{python}
+
+water_geo = gpd.read_file('California_Drinking_Water_System_Area_Boundaries/California_Drinking_Water_System_Area_Boundaries.shp')
+zip_geo = gpd.read_file('california_zip_codes/California_Zip_Codes.shp')
 
 # keeping only the relevant columns
 water_geo = water_geo.loc[:, ["WATER_SYST", "geometry"]] 
@@ -246,17 +359,12 @@ water_zip["ZIP_CODE"] = water_zip["ZIP_CODE"].astype(int)
 # seperate data frame with grouped zip codes
 water_zip_grouped = water_zip.groupby('WATER_SYST')['ZIP_CODE'].apply(lambda x: ', '.join(str(x))).reset_index()
 
+
 ``` 
 
 # Getting the population data to complement the mortality data
 
 ```{python}
-
-# try county fixed effects
-
-# poisson regression or negative binomial regression specifically for count/rate data, weight by population
-
-# age adjust and population adjust! 
 
 c = Census("9155f8ce1852424ae314d4653b3a8730bb1b87c1")
 
@@ -358,6 +466,11 @@ def calculate_population(given_year_range):
                 .filter(lambda x: (x['Population'] != 0).any())
   )
 
+  # keeps only zipcodes in all the years 
+  zip_counts = population['ZIP_CODE'].value_counts() / 10
+  num_years = len(given_year_range)
+  valid_zips = zip_counts[zip_counts == num_years].index
+  population = population[population['ZIP_CODE'].isin(valid_zips)]
 
   # i originally stopped here but the count data said there were deaths while acs said the population is 0
 
@@ -365,59 +478,10 @@ def calculate_population(given_year_range):
 
 population_df = calculate_population(years)
 
-# # graphing
-# # Group the data by 'Strata_Name' and count the number of zeros in each group
-# zero_counts = population_df.groupby('Strata_Name')['Population'].apply(lambda x: (x == 0).sum())
-
-# # Plot the distribution of zero counts
-# plt.bar(zero_counts.index, zero_counts.values)
-# plt.xlabel('Strata_Name')
-# plt.ylabel('Number of Zeros')
-# plt.title('Distribution of Number of Zeros for each Strata_Name')
-# plt.xticks(rotation=90)
-# plt.show()
-
-
-
-# 3 min to run
-```
-
-# Unused Code
-```{python}
-def get_total_ca_population(given_year):
-  x = c.acs5.state(
-    fields = 'B01001_001E', 
-    state_fips = '06', 
-    year = given_year
-    )
-  x = pd.DataFrame(x)
-  total_ca_pop = x['B01001_001E'][0]
-  return x
-
-def get_avg_population_by_age():
-  df = test.copy()
-  df = df.groupby(['Year', 'Strata_Name'])['Population'].mean().reset_index()
-  df.rename(columns={"Population": "Avg CA Population"}, inplace=True)
-
-  return df
-
-avg_by_age = get_avg_population_by_age()
-
-test = pd.merge(test, avg_by_age, on=['Year', 'Strata_Name'], how='left')
-test['Expected Count'] = test['Avg CA Population'] * test['Mortality_Rate_By_Age']
-
-temp_count = test.groupby(['Year', 'ZIP_CODE'])['Expected Count'].sum().reset_index()
-temp_population = test.groupby(['Year', 'ZIP_CODE'])['Avg CA Population'].sum().reset_index()
-
-temp = pd.merge(temp_count, temp_population, on=['Year', 'ZIP_CODE'], how='left')
-temp['Adjusted_Mortality_Rate'] = temp['Expected Count'] / temp['Avg CA Population']
-
 ```
 
 # Getting 2000 US Standard Population
 ```{python}
-
-import pandas as pd
 
 # Path to the file
 file_path = 'stdpop.18ages.txt'
@@ -501,17 +565,14 @@ total_test = (
 total_test['Mortality_Rate'] = total_test['Count'] / total_test['Population']
 total_test['Adjusted_Mortality_Rate'] = total_test['Expected Count'] / total_test['2000 US Standard Population']
 
+# var of expected count is greater than mean of expected count but other way around when looking at adjusted mortality rate
+
 
 ```
 
-# Regressions
 ```{python}
 
-# join mortality_total and water_zip on zip code
-# this creates a dataframe where zip_codes with multiple water systems are repeated for each water system and their respective (same) count
-
 def get_analyte_concentration(water, given_analyte):
-
   analyte_water = (water
                   .loc[water['Analyte Name'] == given_analyte]
                   .groupby(['Sample Year', 'Water System Number'])['Result']
@@ -523,38 +584,7 @@ def get_analyte_concentration(water, given_analyte):
   )
   return analyte_water
 
-
-def fixed_effects_regression(mortality_data, mortality_measurement, given_analyte):
-   # Get the analyte concentrations
-  analyte_water = get_analyte_concentration(water, given_analyte)
-
-  complete = (pd
-              .merge(mortality_data, water_zip, on="ZIP_CODE", how="inner")
-              .merge(analyte_water, how='inner', on=['WATER_SYST', 'Year'])
-              .drop(columns=['WATER_SYST'])
-              .set_index(['ZIP_CODE', 'Year'])
-  )
-  
-  # Identify and remove rows where 'Result' is 0
-  missing_rows = complete[complete['Result'] == 0].shape[0]
-  print("Number of rows where Result is 0:", missing_rows)
-  complete = complete.loc[complete['Result'] != 0]
-  
-  y = complete[mortality_measurement]
-  x = complete['Result']
-  
-  mod = PanelOLS(
-    y, 
-    x, 
-    entity_effects=True, 
-    time_effects=True
-    )
-  twfe = mod.fit()
-
-  return twfe
-
-def poisson_regression(mortality_data, mortality_measurement, given_analyte, offset):
-   # Get the analyte concentrations
+def cleaning_data(mortality_data, given_analyte):
   analyte_water = get_analyte_concentration(water, given_analyte)
 
   complete = (pd
@@ -563,43 +593,32 @@ def poisson_regression(mortality_data, mortality_measurement, given_analyte, off
               .drop(columns=['WATER_SYST'])
               .assign(intercept=1)
   )
-  
-  # Identify and remove rows where 'Result' is 0
-  missing_rows = complete[complete['Result'] == 0].shape[0]
-  print("Number of rows where Result is 0:", missing_rows)
-  complete = complete.loc[complete['Result'] != 0]
-  
-  y = complete[mortality_measurement]
 
-  x = complete[['intercept','Result']]
-  
-  mod = sm.GLM(
-    y,
-    x,
-    offset=np.log(complete[offset]),
-    family=sm.families.Poisson()
+  return complete
+
+```
+
+# IGNORE BELOW THIS LINE AND CONTINUE FROM THE QMD FILE
+
+# Regressions
+```{python}
+
+# join mortality_total and water_zip on zip code
+# this creates a dataframe where zip_codes with multiple water systems are repeated for each water system and their respective (same) count
+
+def get_analyte_concentration(water, given_analyte):
+  analyte_water = (water
+                  .loc[water['Analyte Name'] == given_analyte]
+                  .groupby(['Sample Year', 'Water System Number'])['Result']
+                  .median()
+                  .reset_index()
+                  .rename(columns={"Water System Number": "WATER_SYST", "Sample Year": "Year"})
+                  .sort_values(by=['WATER_SYST', 'Year'], ascending=[True, True])
+                  .reset_index(drop=True)
   )
+  return analyte_water
 
-  twfe = mod.fit()
-  print(twfe.params)
-
-  # f, axes = plt.subplots(1, 2, figsize=(17, 6))
-  # axes[0].plot(y, twfe.resid_response, 'o')
-  # axes[0].set_ylabel("Residuals")
-  # axes[0].set_xlabel("$y$")
-  # axes[1].plot(y, twfe.resid_pearson, 'o')
-  # axes[1].axhline(y=-1, linestyle=':', color='black', label=r'$\pm 1$')
-  # axes[1].axhline(y=+1, linestyle=':', color='black')
-  # axes[1].set_ylabel("Standardized residuals")
-  # axes[1].set_xlabel("$y$")
-  # plt.legend()
-  # plt.show()
-
-  return twfe.summary()
-
-
-def nb_regression(mortality_data, mortality_measurement, given_analyte):
-   # Get the analyte concentrations
+def run_regression(regression, mortality_measurement, mortality_data, given_analyte, offset):
   analyte_water = get_analyte_concentration(water, given_analyte)
 
   complete = (pd
@@ -608,98 +627,118 @@ def nb_regression(mortality_data, mortality_measurement, given_analyte):
               .drop(columns=['WATER_SYST'])
               .assign(intercept=1)
   )
-  
-  # Identify and remove rows where 'Result' is 0
-  missing_rows = complete[complete['Result'] == 0].shape[0]
-  print("Number of rows where Result is 0:", missing_rows)
-  complete = complete.loc[complete['Result'] != 0]
-  
-  y = complete[mortality_measurement]
 
-  x = complete[['intercept','Result']]
-  
-  mod = sm.GLM(
-    y,
-    x,
-    family=sm.families.NegativeBinomial()
-  )
+  if regression == 'twfe':
+    formula = f"{mortality_measurement} ~ intercept + Result + EntityEffects + TimeEffects"
+    twfe_model = PanelOLS.from_formula(
+      formula,
+      data=complete.set_index(["ZIP_CODE", "Year"])
+      ).fit(cov_type='clustered', cluster_entity=True)
+    return twfe_model
 
-  twfe = mod.fit()
-  print(twfe.params)
+  elif (regression == 'poisson') | (regression == 'nb2'):
+    formula = f'{mortality_measurement} ~ intercept + Result + C(Year)'
 
-  # f, axes = plt.subplots(1, 2, figsize=(17, 6))
-  # axes[0].plot(y, twfe.resid_response, 'o')
-  # axes[0].set_ylabel("Residuals")
-  # axes[0].set_xlabel("$y$")
-  # axes[1].plot(y, twfe.resid_pearson, 'o')
-  # axes[1].axhline(y=-1, linestyle=':', color='black', label=r'$\pm 1$')
-  # axes[1].axhline(y=+1, linestyle=':', color='black')
-  # axes[1].set_ylabel("Standardized residuals")
-  # axes[1].set_xlabel("$y$")
-  # plt.legend()
-  # plt.show()
+    poisson_model = smf.glm(
+      formula, 
+      offset=np.log(complete[offset]),
+      family=sm.families.Poisson(), 
+      data=complete
+    ).fit()
 
-  return twfe.summary()
+    if regression == 'poisson':
+      return poisson_model
+
+    elif regression == 'nb2':
+      complete['LAMBDA'] = poisson_model.mu
+      complete['AUX_OLS_DEP'] = complete.apply(lambda x: ((x['Count'] - x['LAMBDA'])**2 - x['LAMBDA']) / x['LAMBDA'], axis=1)      
+
+      alpha_model = sm.OLS(complete['AUX_OLS_DEP'], complete['Result']).fit()
+
+      if alpha_model.pvalues.iloc[0] < 0.01:
+        alpha = alpha_model.params.iloc[0]
+      else:
+        alpha = 0 # poisson
+
+      nb2_model = smf.glm(
+        formula, 
+        offset=np.log(complete[offset]),
+        family=sm.families.NegativeBinomial(alpha=alpha), 
+        data=complete
+      ).fit()
+      return nb2_model
+
+  else:
+    raise ValueError("Invalid regression type. Choose from 'twfe', 'poisson', or 'nb2'.")
+
+run_regression('twfe', 'Count', total_test, 'LEAD', 'Population')
+
+get_analyte_concentration(water, 'LEAD')
+
 
 ```
 
 ```{python}
 
-mortality_measurement = 'Adjusted_Mortality_Rate'
-analyte = 'COPPER, FREE'
-analyte = 'LEAD'
-mortality_data = total_test[['Year', 'ZIP_CODE', mortality_measurement]]
-
-fixed_effects_regression(mortality_data, mortality_measurement, analyte)
-
-
-mortality_measurement = 'Count'
-analyte = 'LEAD'
+analytes = water['Analyte Name'].unique()[0:5]
 offset = 'Population'
 mortality_data = total_test.copy()
 
-poisson_regression(mortality_data, mortality_measurement, analyte, offset)
+def collect_regression_results(regression, mortality_measurement, mortality_data, analytes, offset):
+  results = []
+  
+  for analyte in analytes:
+    try:
+      model = run_regression(regression, mortality_measurement, mortality_data, analyte, offset)
+      coefficient = model.params['Result']
+      p_value = model.pvalues['Result']
+      conf_int = model.conf_int().loc['Result']
 
-mortality_measurement = 'Count'
-analyte = 'LEAD'
-mortality_data = total_test.copy()
+      if regression == 'twfe':
+        std_error = model.std_errors['Result']
+        t_stat = model.tstats['Result']
+      else:
+        std_error = model.bse['Result']
+        t_stat = model.tvalues['Result']
+      
+      results.append({
+        'Analyte': analyte,
+        'Coefficient': coefficient,
+        'Standard Error': std_error,
+        't-statistic': t_stat,
+        'p-value': p_value,
+        'CI Lower Bound': conf_int.iloc[0],
+        'CI Upper Bound': conf_int.iloc[1]
+      })
+    except Exception as e:
+      # Handle any exceptions, such as missing data or convergence issues
+      print(f"An error occurred for analyte {analyte}: {e}")
+      continue
+  
+  return pd.DataFrame(results)
 
-nb_regression(mortality_data, mortality_measurement, analyte) 
+analytes = water['Analyte Name'].unique()
 
+twfe_results = collect_regression_results('twfe', 'Adjusted_Mortality_Rate', mortality_data, analytes, offset)
+# poisson_results = collect_regression_results('poisson', 'Count', mortality_data, analytes, offset)
+# nb2_results = collect_regression_results('nb2', 'Count', mortality_data, analytes, offset)
+
+
+water.loc[water['Units of Measure'] == 'PH', 'Reporting Level'].unique()
 ```
 
 ```{python}
-
-# checking for outliers
-import matplotlib.pyplot as plt
-
-plt.hist(analyte_water['Result'], bins=10, range=(analyte_water['Result'].min(), analyte_water['Result'].max()))
-plt.xlabel('Analyte Result')
-plt.ylabel('Frequency')
-plt.title('Histogram of Analyte Results')
-plt.yscale('log')
-plt.show()
-
-```
-
-# making original.csv
-```{python}
-original["Analyte Name"] = original["Analyte Name"].str.rstrip() 
-original["Result"] = original["Result"].str.rstrip()
-
-original["Sample Year"] = original["Sample Date"].str.split("-").str[2]
-original = original.drop(columns=["Sample Date"])
-
-original = original[~original["Sample Year"].isin(["2023", "2024"])].reset_index(drop=True)
-
-original['Result'] = pd.to_numeric(original['Result'], errors='coerce')
-
-original.to_csv("original.csv", index=False)
+poisson_results = collect_regression_results('poisson', 'Count', mortality_data, analytes, offset)
 ```
 
 ```{python}
+nb2_results = collect_regression_results('nb2', 'Count', mortality_data, analytes, offset)
+```
 
-#  what to do about PH level of 0 since the reporting level is also 0 
+
+```{python}
+
+# what to do about PH level of 0 since the reporting level is also 0 
 # when looking at outliers, the value we set using reporting level is the max a lot of the time
 
 top_analytes = water['Analyte Name'].unique()[:5]
@@ -731,32 +770,5 @@ print("Extra zip codes:", extra_zip_codes)
 print(len(missing_zip_codes))
 print(len(extra_zip_codes))
 
-
 ```
 
-```{python}
-
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import statsmodels.api as sm
-
-url = "http://www.stat.columbia.edu/~gelman/arm/examples/police/frisk_with_noise.dat" 
-df = pd.read_csv(url, skiprows=6, delimiter=" ")
-df.head()
-
-X = (df
-    .groupby(['eth', 'precinct'])[["stops", "past.arrests"]]
-    .sum()
-    .reset_index()
-    .pipe(pd.get_dummies, columns=['eth', 'precinct'])
-    .assign(intercept=1)  # Adds a column called 'intercept' with all values equal to 1.
-    .sort_values(by='stops')
-    .reset_index(drop=True)
-)
-
-y = X.pop("stops")
-
-X
-
-```

@@ -1,0 +1,135 @@
+```{r}
+
+library(fixest)
+library(dplyr)
+library(tidyr)
+library(car)
+
+```
+
+```{r}
+
+water <- read.csv("water.csv")
+mortality <- read.csv("total_test.csv")
+water_zipcode <- read.csv("water_zipcode.csv")
+
+```
+
+```{r}
+
+# Gets the concentration of a given analyte in the water
+analyte <- 'LEAD'
+get_analyte_concentration <- function(water, given_analyte) {
+  analyte_water <- water %>%
+    filter(`Analyte.Name` == given_analyte) %>%
+    group_by(`Sample.Year`, `Water.System.Number`) %>%
+    summarize(Result = median(Result, na.rm = TRUE)) %>%
+    ungroup() %>%
+    rename(WATER_SYST = `Water.System.Number`, Year = `Sample.Year`) %>%
+    arrange(WATER_SYST, Year)
+  
+  return(analyte_water)
+}
+
+# Get the concentration of each analyte in the water
+get_analyte_concentrations <- function(water) {
+  analyte_water <- water %>%
+    group_by(Analyte.Name, Sample.Year, Water.System.Number) %>%
+    summarize(Result = median(Result, na.rm = TRUE), .groups = 'drop') %>%
+    pivot_wider(names_from = Analyte.Name, values_from = Result) %>%
+    rename(WATER_SYST = `Water.System.Number`, Year = `Sample.Year`) %>%
+    arrange(WATER_SYST, Year)
+  
+  return(analyte_water)
+}
+```
+
+```{r}
+
+analyte_results <- get_analyte_concentrations(water)
+
+sanitize_column_names <- function(names) {
+  names <- make.names(names)    # Replace invalid characters
+  return(names)
+}
+
+colnames(analyte_results) <- sanitize_column_names(colnames(analyte_results))
+
+```
+
+```{r}
+
+complete <- mortality %>%
+  inner_join(water_zipcode, by = "ZIP_CODE", relationship = 'many-to-many') %>%
+  inner_join(analyte_results, by = c("WATER_SYST", "Year"), relationship = 'many-to-many') %>%
+  select(-WATER_SYST)
+  
+```
+
+```{r}
+
+# Fit a linear model with all analyte columns
+error_vars <- c()
+
+fit_model_for_column <- function(data, response_var, predictor_var) {
+  tryCatch({
+    formula = as.formula(paste(response_var, "~", predictor_var, 
+    # "+ log(Population)",
+    "| Year + ZIP_CODE"))
+    # Fit the linear model
+    poisson_model <- feglm(
+      fml = formula, 
+      data = data,
+      family = poisson(),
+      offset = log(data[['Population']])
+      )
+
+    # Extract important values
+    summary_model <- summary(poisson_model)
+    coefficient_table <- coeftable(summary_model)
+    
+    # Store the important values in a list
+    results <- list(
+      Coefficient = coefficient_table[predictor_var, "Estimate"],
+      Std_Error = coefficient_table[predictor_var, "Std. Error"],
+      z_value = coefficient_table[predictor_var, "z value"],
+      p_value = coefficient_table[predictor_var, "Pr(>|z|)"],
+      CI_Lower = confint(poisson_model)[predictor_var, 1],
+      CI_Upper = confint(poisson_model)[predictor_var, 2]
+      # population_coef = coefficient_table["Population", "Estimate"],
+      # population_std_error = coefficient_table["Population", "Std. Error"],
+      # population_p_value = coefficient_table["Population", "Pr(>|z|)"]
+    )
+    return(results)
+  }, error = function(e) {
+    # Print the error message and continue
+    print(paste("Error with", predictor_var, ":", e$message))
+    error_vars <<- c(error_vars, predictor_var)
+    return(NULL)
+  })
+}
+
+```
+
+```{r}
+
+data <- complete 
+predictor_vars <- colnames(analyte_results)[!colnames(analyte_results) %in% c("Year", "WATER_SYST")]
+response_var <- "Count"
+
+models_results <- list()
+
+for (predictor in predictor_vars) {
+  models_results[[predictor]] <- fit_model_for_column(data, response_var, predictor)
+}
+results_df <- do.call(rbind, lapply(models_results, as.data.frame))
+
+significant_results <- results_df %>%
+  filter(p_value < 0.05) %>%
+  arrange(p_value)
+
+write.csv(significant_results, "significant_results.csv", row.names = TRUE)
+
+```
+
+
