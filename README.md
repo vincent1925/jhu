@@ -1,6 +1,6 @@
 # Notes on the file's contents:
 
-All the files in the folders + stdpop.18ages.txt are files with the given data. The "cleaned_data" contains files that have been cleaned. Notes on the cleaned dataset are explained below.
+All the files in the california folders + stdpop.18ages.txt are files with the given data. The "cleaned_data" contains files that have been cleaned. Notes on the cleaned dataset are explained below.
 
 Files too large for GitHub are found in [this](https://drive.google.com/drive/folders/1CFRAB6wdipsDzCsJT3llI_BiKUcJ36by?usp=sharing) Google Drive folder. Additionally, the folder has a copy of the cleaned water quality data set water.csv and the mortality data, mortality.csv
 
