@@ -1,4 +1,4 @@
-# Notes on the file's contents:
+# Causal Inference Analysis on Water Contaminants and Mortality in California
 
 All the files in the california folders + stdpop.18ages.txt are files with the given data. The "cleaned_data" contains files that have been cleaned. Notes on the cleaned dataset are explained below.
 
