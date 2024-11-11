@@ -1,5 +1,11 @@
 # Causal Inference Analysis on Water Contaminants and Mortality in California
 
+## Overview
+Little research has been done on the effects of individual contaminants on mortality. By running two-way fixed effects Poisson regressions for each contaminant, I found that most analytes have minor coefficients, but some, such as manganese, have a significant impact on the mortality rate. This project was conducted under the supervision of Benjamin Huynh from the Johns Hopkins Bloomberg School of Public Health.
+
+For any questions, email vzheng@uchicago.edu.
+
+## Metadata
 All the files in the california folders + stdpop.18ages.txt are files with the given data. The "cleaned_data" contains files that have been cleaned. Notes on the cleaned dataset are explained below.
 
 Files too large for GitHub are found in [this](https://drive.google.com/drive/folders/1CFRAB6wdipsDzCsJT3llI_BiKUcJ36by?usp=sharing) Google Drive folder. Additionally, the folder has a copy of the cleaned water quality data set water.csv and the mortality data, mortality.csv
@@ -39,5 +45,3 @@ For std2000:
 For population.csv:
 - data obtained through the ACS API [here](https://www.census.gov/data/developers/data-sets/acs-1year.html).
 - contains data on the population in California for each zip code by age by year.
-
-For questions, email vzheng@uchicago.edu.
